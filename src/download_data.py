@@ -1,16 +1,10 @@
 """
-download_data.py
-----------------
-Downloads the three real data sources into data/raw/ (about 8 MB in total):
+Downloads the raw data into data/raw/ (about 8 MB): the TTC bus delay files
+for 2023 and 2024, hourly Toronto weather from Open-Meteo and the Blue Jays
+home schedule from the MLB Stats API.
 
-  1. TTC bus delay incidents, 2023 and 2024 (City of Toronto Open Data)
-  2. Hourly weather for downtown Toronto (Open-Meteo historical archive)
-  3. Toronto Blue Jays home games at Rogers Centre (MLB Stats API)
-
-Run:
-    python src/download_data.py
+Run: python src/download_data.py
 """
-
 import json
 import urllib.parse
 import urllib.request

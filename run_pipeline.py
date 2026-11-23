@@ -1,17 +1,9 @@
 """
-run_pipeline.py
----------------
-Runs every step in order:
+Runs download -> build -> train.
 
-    1. download the real data   (src/download_data.py)  - needs internet, about 8 MB
-    2. build the clean tables   (src/build_dataset.py)
-    3. train + evaluate models  (src/train.py)
-
-Run:
-    python run_pipeline.py              # everything
-    python run_pipeline.py --offline    # skip steps 1-2 and reuse data/processed/ (already in the repo)
+python run_pipeline.py            full run (needs internet)
+python run_pipeline.py --offline  retrain from data/processed/ only
 """
-
 import subprocess
 import sys
 from pathlib import Path

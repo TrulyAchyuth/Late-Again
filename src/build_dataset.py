@@ -1,17 +1,10 @@
 """
-build_dataset.py
-----------------
-Turns the raw downloads into two clean tables:
+Cleans the raw files and builds the two tables in data/processed/:
+incidents.csv.gz (one row per incident, with weather, holidays and games) and
+hourly.csv.gz (one row per hour of 2023-2024, including hours with no incidents).
 
-  data/processed/incidents.csv.gz  one row per TTC bus delay incident, joined with the
-                                   weather of that hour, holidays and Blue Jays games
-  data/processed/hourly.csv.gz     one row per hour of 2023-2024 (including quiet hours with
-                                   zero incidents) with incident counts, weather and events
-
-Run:
-    python src/build_dataset.py
+Run: python src/build_dataset.py
 """
-
 import json
 
 import holidays
@@ -22,9 +15,9 @@ from config import (HOURLY_FILE, INCIDENTS_FILE, MAJOR_DELAY_MIN, MAX_DELAY_MIN,
 from features import add_time_features, at_station, clean_direction, game_window_flags, weather_category
 
 
-# ---------------------------------------------------------------------------
+# 
 # Loaders: one function per source
-# ---------------------------------------------------------------------------
+# 
 def load_incidents() -> pd.DataFrame:
     frames = [pd.read_excel(RAW_DIR / f"ttc_bus_delays_{y}.xlsx") for y in YEARS]
     df = pd.concat(frames, ignore_index=True)
@@ -69,9 +62,9 @@ def holiday_dates():
     return list(holidays.CA(subdiv="ON", years=YEARS).keys())
 
 
-# ---------------------------------------------------------------------------
+# 
 # Cleaning
-# ---------------------------------------------------------------------------
+# 
 def clean_incidents(df: pd.DataFrame, log=print) -> pd.DataFrame:
     df = df.copy()
     n0 = len(df)
@@ -107,7 +100,7 @@ def build(log=print):
     hols = holiday_dates()
     log(f"  {len(weather):,} weather hours, {len(games)} Blue Jays home games, {len(hols)} holidays")
 
-    # ---- incident table ----
+    # incident table
     inc = incidents.merge(weather, on="hour_ts", how="left")
     missing_weather = inc["temperature_c"].isna().sum()
     inc = inc.dropna(subset=["temperature_c"])
@@ -115,7 +108,7 @@ def build(log=print):
     inc = add_time_features(inc, "timestamp", hols)
     inc["jays_game_window"] = game_window_flags(inc["timestamp"], games)
 
-    # ---- hourly table: every hour, even those with no incidents ----
+    # hourly table: every hour, even those with no incidents
     counts = incidents.groupby("hour_ts").agg(incidents=("delay_min", "size"),
                                               major_incidents=("major_delay", "sum"),
                                               delay_minutes=("delay_min", "sum"))

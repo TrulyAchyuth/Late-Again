@@ -1,15 +1,7 @@
 """
-predict_tools.py
-----------------
-Everything the dashboard needs to make and explain a prediction for ONE incident.
-
-    make_row()    turn simple form inputs into the exact columns the models expect
-    predict()     chance of a major delay + expected delay in minutes
-    explain()     how much each group of inputs (incident, route, time, weather, events)
-                  moved the prediction away from a typical incident (Shapley values)
-    what_if()     change one input step by step and watch the prediction move
+Prediction helpers for the Predict page: make_row, predict, explain
+(Shapley values over five input groups) and what_if.
 """
-
 import datetime as dt
 import itertools
 import math

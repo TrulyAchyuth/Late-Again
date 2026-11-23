@@ -1,16 +1,10 @@
 """
-live_weather.py
----------------
-Fetches the weather for downtown Toronto at a given date and hour from Open-Meteo
-(free, no API key) and returns it in the same units the model was trained on.
+Gets downtown Toronto weather for a date and hour from Open-Meteo, in the
+same units the model was trained on. Uses the archive API for older dates and
+the forecast API for recent ones.
 
-    * dates more than ~5 days ago  -> historical archive API
-    * recent / next 16 days        -> forecast API
-
-Quick test:
-    python src/live_weather.py
+Run: python src/live_weather.py
 """
-
 import datetime as dt
 import json
 import urllib.parse

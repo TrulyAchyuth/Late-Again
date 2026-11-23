@@ -1,14 +1,11 @@
 """
-config.py
----------
-One place for file paths, data sources and settings, so every script agrees.
+File paths, data sources and settings shared by all the scripts.
 """
-
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# ---- Folders ----
+# Folders
 RAW_DIR = ROOT / "data" / "raw"              # downloaded files (not committed to git)
 PROCESSED_DIR = ROOT / "data" / "processed"  # cleaned tables (committed, gzip-compressed)
 MODELS_DIR = ROOT / "models"
@@ -18,7 +15,7 @@ INCIDENTS_FILE = PROCESSED_DIR / "incidents.csv.gz"   # one row per delay incide
 HOURLY_FILE = PROCESSED_DIR / "hourly.csv.gz"         # one row per hour of 2023-2024
 METRICS_FILE = REPORTS_DIR / "metrics.json"
 
-# ---- Data sources (all free, no API key) ----
+# Data sources (all free, no API key)
 CITY = "Toronto"
 LATITUDE, LONGITUDE = 43.6532, -79.3832       # downtown Toronto
 TIMEZONE = "America/Toronto"
@@ -38,17 +35,17 @@ WEATHER_VARS = ["temperature_2m", "relative_humidity_2m", "precipitation", "rain
 MLB_SCHEDULE_URL = "https://statsapi.mlb.com/api/v1/schedule"   # Toronto Blue Jays = team 141
 BLUE_JAYS_TEAM_ID = 141
 
-# ---- Cleaning and targets ----
+# Cleaning and targets
 MAX_DELAY_MIN = 120        # longer "delays" are mostly diversions/data-entry outliers (~2% of rows)
 MAJOR_DELAY_MIN = 15       # an incident is a "major delay" if the next bus is >= 15 min late
 RANDOM_STATE = 42
 
-# ---- Time-based split (no shuffling: we always predict the future from the past) ----
+# Time-based split (no shuffling: we always predict the future from the past)
 TRAIN_END = "2023-09-30"   # train:      Jan-Sep 2023
 VALID_END = "2023-12-31"   # validation: Oct-Dec 2023 (used to pick the best model)
                            # test:       all of 2024 (touched once, at the very end)
 
-# ---- Features for the incident models (all known when an incident is reported) ----
+# Features for the incident models (all known when an incident is reported)
 INCIDENT_CATEGORICAL = ["incident", "route", "direction", "weather", "day_of_week"]
 INCIDENT_NUMERIC = ["hour", "month", "is_weekend", "is_holiday", "is_rush_hour", "at_station",
                     "temperature_c", "precipitation_mm", "snowfall_cm", "snow_depth_cm",

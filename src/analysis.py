@@ -1,15 +1,10 @@
 """
-analysis.py
------------
-Summary tables used by the dashboard and the EDA notebook.
+Summary tables for the dashboard and the notebook.
 
-The key idea for weather and events: a snowy Monday at 8 am should be compared with
-an ORDINARY Monday at 8 am, not with 3 am on a Sunday. So for every hour we compute
-the "expected" number of incidents (average for that year, weekday and hour) and then
-ask: in snowy / rainy / game-time hours, how many incidents happened compared with expected?
-A ratio of 1.25 means 25% more incidents than a normal hour at the same time of week.
+For weather and events I compare each hour with what is normal for that year,
+weekday and hour. A ratio of 1.25 means 25% more incidents than a normal hour
+at the same time of the week.
 """
-
 import numpy as np
 import pandas as pd
 

@@ -1,24 +1,14 @@
 """
-train.py
---------
-Trains three models on REAL data with a TIME-BASED split:
+Trains the two models with a time-based split.
 
-    train:       Jan-Sep 2023
-    validation:  Oct-Dec 2023   -> used to choose the best model of each type
-    test:        all of 2024    -> used once, at the end, for the reported numbers
+train: Jan-Sep 2023, validation: Oct-Dec 2023 (to pick the model), test: 2024.
+1. major-delay classifier: will the next bus be 15+ minutes late?
+2. delay regressor: how many minutes late?
+Both are compared with simple baselines, and an ablation retrains them without
+some inputs to see what those inputs add.
 
-Models
-  1. Major-delay classifier   - will this incident make the next bus >= 15 min late?
-  2. Delay regressor          - how many minutes late will the next bus be?
-
-Every model is compared with simple baselines, so we can say how much the ML adds, and
-an "ablation" retrains the winners without the weather / event inputs to measure what
-those inputs really contribute.
-
-Run:
-    python src/train.py
+Run: python src/train.py
 """
-
 import json
 
 import joblib
@@ -43,9 +33,9 @@ from config import (EVENT_FEATURES, INCIDENT_CATEGORICAL, WEATHER_FEATURES,
 RS = RANDOM_STATE
 
 
-# ---------------------------------------------------------------------------
+# 
 # Helpers
-# ---------------------------------------------------------------------------
+# 
 def time_split(df, time_col):
     """Split rows by date, never randomly: the model must predict the future from the past."""
     t = pd.to_datetime(df[time_col])
@@ -79,9 +69,9 @@ def rounded(d):
     return {k: (round(float(v), 4) if v is not None else None) for k, v in d.items()}
 
 
-# ---------------------------------------------------------------------------
+# 
 # Baselines (no machine learning)
-# ---------------------------------------------------------------------------
+# 
 class IncidentTypeBaseline:
     """Predict the training-set median delay of the incident type (a sensible 'rule of thumb')."""
 
@@ -94,9 +84,9 @@ class IncidentTypeBaseline:
         return X["incident"].map(self.medians).fillna(self.overall).to_numpy()
 
 
-# ---------------------------------------------------------------------------
+# 
 # 1 + 2: incident models
-# ---------------------------------------------------------------------------
+# 
 CLASSIFIERS = {
     "Logistic Regression": LogisticRegression(max_iter=2000),
     "Decision Tree": DecisionTreeClassifier(max_depth=10, min_samples_leaf=50, random_state=RS),
@@ -121,7 +111,7 @@ def train_incident_models(df, log=print):
     X = {k: v[INCIDENT_FEATURES] for k, v in [("train", train), ("valid", valid), ("test", test),
                                                 ("full", full_train)]}
 
-    # ---- classification ----
+    # classification
     yc = {k: v["major_delay"] for k, v in [("train", train), ("valid", valid), ("test", test),
                                             ("full", full_train)]}
     clf_rows = []
@@ -133,7 +123,7 @@ def train_incident_models(df, log=print):
         log(f"  [clf] {name:20s} valid ROC-AUC {scores['roc_auc']:.3f}  F1 {scores['f1']:.3f}")
     best_clf_name = max(clf_rows, key=lambda r: r["roc_auc"])["model"]
 
-    # ---- regression ----
+    # regression
     yr = {k: v["delay_min"] for k, v in [("train", train), ("valid", valid), ("test", test),
                                           ("full", full_train)]}
     reg_rows = []
@@ -144,7 +134,7 @@ def train_incident_models(df, log=print):
         log(f"  [reg] {name:20s} valid MAE {scores['mae']:.2f} min")
     best_reg_name = min(reg_rows, key=lambda r: r["mae"])["model"]
 
-    # ---- refit the winners on all of 2023, evaluate ONCE on 2024 ----
+    # refit the winners on all of 2023, evaluate ONCE on 2024
     clf = make_pipeline(CLASSIFIERS[best_clf_name], INCIDENT_CATEGORICAL, INCIDENT_NUMERIC).fit(X["full"], yc["full"])
     reg = make_pipeline(REGRESSORS[best_reg_name], INCIDENT_CATEGORICAL, INCIDENT_NUMERIC).fit(X["full"], yr["full"])
 
@@ -202,7 +192,7 @@ def train_incident_models(df, log=print):
     return clf, reg, rule, results, importance, preds
 
 
-# ---------------------------------------------------------------------------
+# 
 def main(log=print):
     incidents = pd.read_csv(INCIDENTS_FILE, parse_dates=["timestamp"])
     clf, reg, rule, inc_results, importance, preds = train_incident_models(incidents, log)

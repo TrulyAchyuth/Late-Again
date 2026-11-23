@@ -1,10 +1,6 @@
 """
-features.py
------------
-Small, pure helper functions that turn raw values into model features.
-They are kept separate (and simple) so they are easy to unit-test.
+Small helper functions that turn raw values into model features.
 """
-
 import numpy as np
 import pandas as pd
 
