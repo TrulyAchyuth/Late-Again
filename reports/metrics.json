@@ -1,0 +1,122 @@
+{
+  "ablation": {
+    "weather inputs": {
+      "roc_auc": 0.8419,
+      "mae": 6.2948
+    },
+    "event inputs": {
+      "roc_auc": 0.8389,
+      "mae": 6.2923
+    },
+    "route": {
+      "roc_auc": 0.6021,
+      "mae": 7.6428
+    },
+    "incident type": {
+      "roc_auc": 0.8255,
+      "mae": 6.4268
+    }
+  },
+  "classifier": {
+    "best": "Gradient Boosting",
+    "validation": [
+      {
+        "model": "Logistic Regression",
+        "accuracy": 0.7637,
+        "precision": 0.6765,
+        "recall": 0.7496,
+        "f1": 0.7112,
+        "roc_auc": 0.8412
+      },
+      {
+        "model": "Decision Tree",
+        "accuracy": 0.6826,
+        "precision": 0.6513,
+        "recall": 0.3923,
+        "f1": 0.4897,
+        "roc_auc": 0.6546
+      },
+      {
+        "model": "Random Forest",
+        "accuracy": 0.7124,
+        "precision": 0.7146,
+        "recall": 0.4313,
+        "f1": 0.5379,
+        "roc_auc": 0.8126
+      },
+      {
+        "model": "Gradient Boosting",
+        "accuracy": 0.7886,
+        "precision": 0.7442,
+        "recall": 0.6938,
+        "f1": 0.7181,
+        "roc_auc": 0.8655
+      }
+    ],
+    "test": {
+      "accuracy": 0.7677,
+      "precision": 0.7077,
+      "recall": 0.6927,
+      "f1": 0.7001,
+      "roc_auc": 0.839
+    }
+  },
+  "regressor": {
+    "best": "Gradient Boosting",
+    "validation": [
+      {
+        "model": "Linear Regression",
+        "mae": 6.1489,
+        "r2": 0.3197
+      },
+      {
+        "model": "Decision Tree",
+        "mae": 7.061,
+        "r2": 0.2129
+      },
+      {
+        "model": "Random Forest",
+        "mae": 6.6957,
+        "r2": 0.2673
+      },
+      {
+        "model": "Gradient Boosting",
+        "mae": 5.5789,
+        "r2": 0.3046
+      }
+    ],
+    "test": {
+      "mae": 6.2923,
+      "r2": 0.2811
+    }
+  },
+  "baselines": {
+    "clf_majority": {
+      "accuracy": 0.6085,
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "roc_auc": null
+    },
+    "clf_incident_rule": {
+      "accuracy": 0.6052,
+      "precision": 0.487,
+      "recall": 0.1613,
+      "f1": 0.2423,
+      "roc_auc": 0.5564
+    },
+    "reg_global_median": {
+      "mae": 8.0056,
+      "r2": -0.0744
+    },
+    "reg_incident_median": {
+      "mae": 7.8277,
+      "r2": 0.166
+    }
+  },
+  "rows": {
+    "train": 38408,
+    "valid": 15735,
+    "test": 57607
+  }
+}

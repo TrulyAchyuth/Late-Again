@@ -1,20 +1,19 @@
 """
 train.py
 --------
-Trains and compares models for two tasks:
+Trains three models on REAL data with a TIME-BASED split:
 
-    * Classification: will the trip be delayed (> 5 min late)?   target = "delayed"
-    * Regression:     how many minutes late will it be?          target = "arrival_delay_min"
+    train:       Jan-Sep 2023
+    validation:  Oct-Dec 2023   -> used to choose the best model of each type
+    test:        all of 2024    -> used once, at the end, for the reported numbers
 
-For each task we try 4 models, measure them on a held-out test set (20% of
-trips the models never saw), and save the best one to models/.
+Models
+  1. Major-delay classifier   - will this incident make the next bus >= 15 min late?
+  2. Delay regressor          - how many minutes late will the next bus be?
 
-Outputs:
-    models/best_classifier.joblib, models/best_regressor.joblib
-    models/app_metadata.json                (info the dashboard needs)
-    reports/metrics_classification.csv, reports/metrics_regression.csv
-    reports/test_predictions.csv            (actual vs predicted, test set)
-    reports/figures/09..12_*.png            (model comparison charts)
+Every model is compared with simple baselines, so we can say how much the ML adds, and
+an "ablation" retrains the winners without the weather / event inputs to measure what
+those inputs really contribute.
 
 Run:
     python src/train.py
@@ -23,205 +22,210 @@ Run:
 import json
 
 import joblib
-import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
-import seaborn as sns
+from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import (GradientBoostingClassifier, GradientBoostingRegressor,
+from sklearn.ensemble import (HistGradientBoostingClassifier, HistGradientBoostingRegressor,
                               RandomForestClassifier, RandomForestRegressor)
 from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.metrics import (ConfusionMatrixDisplay, accuracy_score, f1_score,
-                             mean_absolute_error, mean_squared_error, precision_score,
+from sklearn.metrics import (accuracy_score, f1_score, mean_absolute_error, precision_score,
                              r2_score, recall_score, roc_auc_score)
-from sklearn.model_selection import cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
-from config import (CATEGORICAL_FEATURES, CLEAN_DATA, FEATURES, FIGURES_DIR, MODELS_DIR,
-                    NUMERIC_FEATURES, RANDOM_STATE, REPORTS_DIR, TARGET_CLASS, TARGET_REG,
-                    TEST_SIZE, DELAY_THRESHOLD_MIN)
+from config import (EVENT_FEATURES, INCIDENT_CATEGORICAL, WEATHER_FEATURES,
+                    INCIDENT_FEATURES, INCIDENT_NUMERIC, INCIDENTS_FILE, MAJOR_DELAY_MIN,
+                    METRICS_FILE, MODELS_DIR, RANDOM_STATE, REPORTS_DIR, TRAIN_END, VALID_END)
 
 RS = RANDOM_STATE
 
 
-def make_preprocessor():
-    """Turn text columns into 0/1 columns and put numbers on a similar scale."""
-    return ColumnTransformer([
-        ("categorical", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
-        ("numeric", StandardScaler(), NUMERIC_FEATURES),
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def time_split(df, time_col):
+    """Split rows by date, never randomly: the model must predict the future from the past."""
+    t = pd.to_datetime(df[time_col])
+    train = df[t <= TRAIN_END]
+    valid = df[(t > TRAIN_END) & (t <= VALID_END)]
+    test = df[t > VALID_END]
+    return train, valid, test
+
+
+def make_pipeline(model, categorical, numeric):
+    """One-hot encode text columns (rare values grouped as 'infrequent'), scale numbers."""
+    prep = ColumnTransformer([
+        ("cat", OneHotEncoder(handle_unknown="infrequent_if_exist", min_frequency=100,
+                              sparse_output=False), categorical),
+        ("num", StandardScaler(), numeric),
     ])
+    return Pipeline([("prep", prep), ("model", clone(model))])   # clone = fresh, unfitted copy
 
 
-def make_pipeline(model):
-    """Preprocessing + model in one object, so new data is treated the same way."""
-    return Pipeline([("prep", make_preprocessor()), ("model", model)])
+def classification_scores(y, pred, proba):
+    return {"accuracy": accuracy_score(y, pred), "precision": precision_score(y, pred, zero_division=0),
+            "recall": recall_score(y, pred), "f1": f1_score(y, pred),
+            "roc_auc": roc_auc_score(y, proba) if proba is not None else None}
 
 
+def regression_scores(y, pred):
+    return {"mae": mean_absolute_error(y, pred), "r2": r2_score(y, pred)}
+
+
+def rounded(d):
+    return {k: (round(float(v), 4) if v is not None else None) for k, v in d.items()}
+
+
+# ---------------------------------------------------------------------------
+# Baselines (no machine learning)
+# ---------------------------------------------------------------------------
+class IncidentTypeBaseline:
+    """Predict the training-set median delay of the incident type (a sensible 'rule of thumb')."""
+
+    def fit(self, X, y):
+        self.medians = y.groupby(X["incident"]).median()
+        self.overall = float(y.median())
+        return self
+
+    def predict(self, X):
+        return X["incident"].map(self.medians).fillna(self.overall).to_numpy()
+
+
+# ---------------------------------------------------------------------------
+# 1 + 2: incident models
+# ---------------------------------------------------------------------------
 CLASSIFIERS = {
     "Logistic Regression": LogisticRegression(max_iter=2000),
-    "Decision Tree": DecisionTreeClassifier(max_depth=8, random_state=RS),
-    "Random Forest": RandomForestClassifier(n_estimators=200, min_samples_leaf=2, random_state=RS, n_jobs=-1),
-    "Gradient Boosting": GradientBoostingClassifier(random_state=RS),
+    "Decision Tree": DecisionTreeClassifier(max_depth=10, min_samples_leaf=50, random_state=RS),
+    "Random Forest": RandomForestClassifier(n_estimators=150, min_samples_leaf=20, max_depth=18,
+                                            n_jobs=-1, random_state=RS),
+    "Gradient Boosting": HistGradientBoostingClassifier(max_iter=300, learning_rate=0.08, random_state=RS),
 }
-
 REGRESSORS = {
     "Linear Regression": LinearRegression(),
-    "Decision Tree": DecisionTreeRegressor(max_depth=8, random_state=RS),
-    "Random Forest": RandomForestRegressor(n_estimators=200, min_samples_leaf=2, random_state=RS, n_jobs=-1),
-    "Gradient Boosting": GradientBoostingRegressor(random_state=RS),
+    "Decision Tree": DecisionTreeRegressor(max_depth=10, min_samples_leaf=50, random_state=RS),
+    "Random Forest": RandomForestRegressor(n_estimators=150, min_samples_leaf=20, max_depth=18,
+                                           n_jobs=-1, random_state=RS),
+    "Gradient Boosting": HistGradientBoostingRegressor(loss="absolute_error", max_iter=300,
+                                                       learning_rate=0.08, random_state=RS),
 }
 
 
-def train_classifiers(X_train, X_test, y_train, y_test):
-    rows, fitted = [], {}
+def train_incident_models(df, log=print):
+    train, valid, test = time_split(df, "timestamp")
+    full_train = pd.concat([train, valid])
+    log(f"Incidents  train {len(train):,} | valid {len(valid):,} | test {len(test):,}")
+    X = {k: v[INCIDENT_FEATURES] for k, v in [("train", train), ("valid", valid), ("test", test),
+                                                ("full", full_train)]}
+
+    # ---- classification ----
+    yc = {k: v["major_delay"] for k, v in [("train", train), ("valid", valid), ("test", test),
+                                            ("full", full_train)]}
+    clf_rows = []
     for name, model in CLASSIFIERS.items():
-        pipe = make_pipeline(model)
-        cv_f1 = cross_val_score(pipe, X_train, y_train, cv=5, scoring="f1").mean()
-        pipe.fit(X_train, y_train)
-        pred = pipe.predict(X_test)
-        proba = pipe.predict_proba(X_test)[:, 1]
-        rows.append({
-            "model": name,
-            "cv_f1 (train, 5-fold)": cv_f1,
-            "accuracy": accuracy_score(y_test, pred),
-            "precision": precision_score(y_test, pred),
-            "recall": recall_score(y_test, pred),
-            "f1": f1_score(y_test, pred),
-            "roc_auc": roc_auc_score(y_test, proba),
-        })
-        fitted[name] = pipe
-        print(f"  {name:20s} test F1 = {rows[-1]['f1']:.3f}")
-    table = pd.DataFrame(rows).sort_values("f1", ascending=False).round(4)
-    return table, fitted
+        pipe = make_pipeline(model, INCIDENT_CATEGORICAL, INCIDENT_NUMERIC).fit(X["train"], yc["train"])
+        proba = pipe.predict_proba(X["valid"])[:, 1]
+        scores = classification_scores(yc["valid"], (proba >= 0.5).astype(int), proba)
+        clf_rows.append({"model": name, **rounded(scores)})
+        log(f"  [clf] {name:20s} valid ROC-AUC {scores['roc_auc']:.3f}  F1 {scores['f1']:.3f}")
+    best_clf_name = max(clf_rows, key=lambda r: r["roc_auc"])["model"]
 
-
-def train_regressors(X_train, X_test, y_train, y_test):
-    rows, fitted = [], {}
+    # ---- regression ----
+    yr = {k: v["delay_min"] for k, v in [("train", train), ("valid", valid), ("test", test),
+                                          ("full", full_train)]}
+    reg_rows = []
     for name, model in REGRESSORS.items():
-        pipe = make_pipeline(model)
-        cv_mae = -cross_val_score(pipe, X_train, y_train, cv=5, scoring="neg_mean_absolute_error").mean()
-        pipe.fit(X_train, y_train)
-        pred = pipe.predict(X_test)
-        rows.append({
-            "model": name,
-            "cv_mae (train, 5-fold)": cv_mae,
-            "mae": mean_absolute_error(y_test, pred),
-            "rmse": mean_squared_error(y_test, pred) ** 0.5,
-            "r2": r2_score(y_test, pred),
-        })
-        fitted[name] = pipe
-        print(f"  {name:20s} test MAE = {rows[-1]['mae']:.3f} min")
-    table = pd.DataFrame(rows).sort_values("mae").round(4)
-    return table, fitted
+        pipe = make_pipeline(model, INCIDENT_CATEGORICAL, INCIDENT_NUMERIC).fit(X["train"], yr["train"])
+        scores = regression_scores(yr["valid"], pipe.predict(X["valid"]))
+        reg_rows.append({"model": name, **rounded(scores)})
+        log(f"  [reg] {name:20s} valid MAE {scores['mae']:.2f} min")
+    best_reg_name = min(reg_rows, key=lambda r: r["mae"])["model"]
 
+    # ---- refit the winners on all of 2023, evaluate ONCE on 2024 ----
+    clf = make_pipeline(CLASSIFIERS[best_clf_name], INCIDENT_CATEGORICAL, INCIDENT_NUMERIC).fit(X["full"], yc["full"])
+    reg = make_pipeline(REGRESSORS[best_reg_name], INCIDENT_CATEGORICAL, INCIDENT_NUMERIC).fit(X["full"], yr["full"])
 
-def save_comparison_chart(table, metrics, filename, title):
-    long = table.melt(id_vars="model", value_vars=metrics, var_name="metric", value_name="score")
-    fig, ax = plt.subplots(figsize=(9, 4))
-    sns.barplot(data=long, x="metric", y="score", hue="model", ax=ax)
-    ax.set(title=title, xlabel="", ylabel="Score")
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-    fig.savefig(FIGURES_DIR / filename, dpi=120)
-    plt.close(fig)
+    proba = clf.predict_proba(X["test"])[:, 1]
+    clf_test = classification_scores(yc["test"], (proba >= 0.5).astype(int), proba)
+    reg_pred = reg.predict(X["test"])
+    reg_test = regression_scores(yr["test"], reg_pred)
 
-
-def main():
-    df = pd.read_csv(CLEAN_DATA, keep_default_na=False, na_values=[""])
-    X = df[FEATURES]
-
-    # One split for both tasks. "stratify" keeps the same share of delayed trips in each part.
-    X_train, X_test, idx_train, idx_test = train_test_split(
-        X, df.index, test_size=TEST_SIZE, random_state=RS, stratify=df[TARGET_CLASS])
-    print(f"Train rows: {len(X_train):,}   Test rows: {len(X_test):,}")
-
-    # Baselines: what you get without any machine learning
-    yc_test = df.loc[idx_test, TARGET_CLASS]
-    yr_train, yr_test = df.loc[idx_train, TARGET_REG], df.loc[idx_test, TARGET_REG]
-    majority = df.loc[idx_train, TARGET_CLASS].mode()[0]
-    baseline = {
-        "classification_majority_class_accuracy": round(float((yc_test == majority).mean()), 4),
-        "regression_predict_mean_mae": round(float(mean_absolute_error(yr_test, [yr_train.mean()] * len(yr_test))), 4),
+    # Baselines on the same 2024 test set
+    majority = int(yc["full"].mode()[0])
+    rule = IncidentTypeBaseline().fit(X["full"], yr["full"])
+    rule_pred = rule.predict(X["test"])
+    rule_major = (rule_pred >= MAJOR_DELAY_MIN).astype(int)
+    baselines = {
+        "clf_majority": rounded(classification_scores(yc["test"], np.full(len(yc["test"]), majority), None)),
+        "clf_incident_rule": rounded(classification_scores(yc["test"], rule_major, rule_pred)),
+        "reg_global_median": rounded(regression_scores(yr["test"], np.full(len(yr["test"]), float(yr["full"].median())))),
+        "reg_incident_median": rounded(regression_scores(yr["test"], rule_pred)),
     }
-    print("Baselines:", baseline)
 
-    print("\nClassification (delayed vs on time)")
-    clf_table, clfs = train_classifiers(X_train, X_test, df.loc[idx_train, TARGET_CLASS], yc_test)
-    print("\nRegression (delay in minutes)")
-    reg_table, regs = train_regressors(X_train, X_test, yr_train, yr_test)
-
-    best_clf_name = clf_table.iloc[0]["model"]
-    best_reg_name = reg_table.iloc[0]["model"]
-    best_clf, best_reg = clfs[best_clf_name], regs[best_reg_name]
-    print(f"\nBest classifier: {best_clf_name}   Best regressor: {best_reg_name}")
-
-    # ---- Save tables ----
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    clf_table.to_csv(REPORTS_DIR / "metrics_classification.csv", index=False)
-    reg_table.to_csv(REPORTS_DIR / "metrics_regression.csv", index=False)
-
-    # Actual vs predicted on the test set (used by the dashboard)
-    test_pred = df.loc[idx_test, ["trip_id", "transport_type", "route_id", "weather_condition", "event_type"]].copy()
-    test_pred["actual"] = yr_test.values
-    test_pred["predicted"] = best_reg.predict(X_test).round(2)
-    test_pred["actual_delayed"] = yc_test.values
-    test_pred["predicted_delayed"] = best_clf.predict(X_test)
-    test_pred.to_csv(REPORTS_DIR / "test_predictions.csv", index=False)
-
-    # ---- Charts ----
-    FIGURES_DIR.mkdir(parents=True, exist_ok=True)
-    save_comparison_chart(clf_table, ["accuracy", "precision", "recall", "f1", "roc_auc"],
-                          "09_classifier_comparison.png", "Classification models (test set, higher is better)")
-    save_comparison_chart(reg_table, ["mae", "rmse"],
-                          "10_regressor_comparison.png", "Regression models (test set, lower is better)")
-
-    fig, ax = plt.subplots(figsize=(5, 4))
-    ConfusionMatrixDisplay.from_predictions(yc_test, test_pred["predicted_delayed"],
-                                            display_labels=["On time", "Delayed"], cmap="Blues", ax=ax)
-    ax.set_title(f"Confusion matrix: {best_clf_name}")
-    fig.tight_layout()
-    fig.savefig(FIGURES_DIR / "11_confusion_matrix.png", dpi=120)
-    plt.close(fig)
-
-    # Permutation importance: how much worse does the model get if we shuffle one column?
-    imp = permutation_importance(best_reg, X_test, yr_test, n_repeats=5, random_state=RS,
-                                 scoring="neg_mean_absolute_error")
-    importance = (pd.DataFrame({"feature": FEATURES, "importance": imp.importances_mean})
+    # Which inputs matter? (permutation importance on a 2024 sample)
+    sample = X["test"].sample(min(8000, len(X["test"])), random_state=RS)
+    imp = permutation_importance(reg, sample, yr["test"].loc[sample.index], n_repeats=3,
+                                 random_state=RS, scoring="neg_mean_absolute_error")
+    importance = (pd.DataFrame({"feature": INCIDENT_FEATURES, "importance": imp.importances_mean})
                   .sort_values("importance", ascending=False))
-    importance.to_csv(REPORTS_DIR / "feature_importance.csv", index=False)
-    fig, ax = plt.subplots(figsize=(7, 6))
-    sns.barplot(data=importance, y="feature", x="importance", color="#2a6f97", ax=ax)
-    ax.set(title=f"Feature importance ({best_reg_name} regressor)",
-           xlabel="Increase in MAE when the feature is shuffled (min)", ylabel="")
-    fig.tight_layout()
-    fig.savefig(FIGURES_DIR / "12_feature_importance.png", dpi=120)
-    plt.close(fig)
 
-    # ---- Save models + info the dashboard needs for its input form ----
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(best_clf, MODELS_DIR / "best_classifier.joblib")
-    joblib.dump(best_reg, MODELS_DIR / "best_regressor.joblib")
-    routes = (df.groupby("route_id")
-                .agg(transport_type=("transport_type", "first"),
-                     distance_km=("distance_km", "first"),
-                     scheduled_duration_min=("scheduled_duration_min", "median"))
-                .reset_index())
-    metadata = {
-        "best_classifier": best_clf_name,
-        "best_regressor": best_reg_name,
-        "delay_threshold_min": DELAY_THRESHOLD_MIN,
-        "baselines": baseline,
-        "train_rows": len(X_train),
-        "test_rows": len(X_test),
-        "routes": routes.to_dict(orient="records"),
+    # Test predictions for the dashboard's "actual vs predicted" chart
+    preds = test[["timestamp", "route", "incident", "weather", "delay_min", "major_delay"]].copy()
+    preds["predicted_delay_min"] = reg_pred.round(2)
+    preds["major_delay_proba"] = proba.round(4)
+
+    # Ablation: retrain the winners WITHOUT some inputs and see how much worse they get
+    groups = {"weather inputs": WEATHER_FEATURES, "event inputs": EVENT_FEATURES,
+              "route": ["route"], "incident type": ["incident"]}
+    ablation = {}
+    for label, drop in groups.items():
+        cat = [c for c in INCIDENT_CATEGORICAL if c not in drop]
+        num = [c for c in INCIDENT_NUMERIC if c not in drop]
+        c_pipe = make_pipeline(CLASSIFIERS[best_clf_name], cat, num).fit(X["full"][cat + num], yc["full"])
+        r_pipe = make_pipeline(REGRESSORS[best_reg_name], cat, num).fit(X["full"][cat + num], yr["full"])
+        ablation[label] = rounded({
+            "roc_auc": roc_auc_score(yc["test"], c_pipe.predict_proba(X["test"][cat + num])[:, 1]),
+            "mae": mean_absolute_error(yr["test"], r_pipe.predict(X["test"][cat + num])),
+        })
+        log(f"  [ablation] without {label}: done")
+
+    results = {
+        "ablation": ablation,
+        "classifier": {"best": best_clf_name, "validation": clf_rows, "test": rounded(clf_test)},
+        "regressor": {"best": best_reg_name, "validation": reg_rows, "test": rounded(reg_test)},
+        "baselines": baselines,
+        "rows": {"train": len(train), "valid": len(valid), "test": len(test)},
     }
-    (MODELS_DIR / "app_metadata.json").write_text(json.dumps(metadata, indent=2))
+    return clf, reg, rule, results, importance, preds
 
-    print("\n", clf_table.to_string(index=False))
-    print("\n", reg_table.to_string(index=False))
-    print("\nSaved models, metrics and charts.")
+
+# ---------------------------------------------------------------------------
+def main(log=print):
+    incidents = pd.read_csv(INCIDENTS_FILE, parse_dates=["timestamp"])
+    clf, reg, rule, inc_results, importance, preds = train_incident_models(incidents, log)
+
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(clf, MODELS_DIR / "major_delay_classifier.joblib", compress=3)
+    joblib.dump(reg, MODELS_DIR / "delay_regressor.joblib", compress=3)
+    joblib.dump(rule.medians.to_dict(), MODELS_DIR / "incident_medians.joblib")
+
+    metrics = inc_results
+    METRICS_FILE.write_text(json.dumps(metrics, indent=2))
+    importance.to_csv(REPORTS_DIR / "feature_importance.csv", index=False)
+    preds.to_csv(REPORTS_DIR / "test_predictions.csv.gz", index=False)
+
+    c, r, b, ab = metrics["classifier"], metrics["regressor"], metrics["baselines"], metrics["ablation"]
+    log("\n==== 2024 test results ====")
+    log(f"Major delay ({c['best']}): ROC-AUC {c['test']['roc_auc']:.3f}, F1 {c['test']['f1']:.3f} "
+        f"| incident-type rule: ROC-AUC {b['clf_incident_rule']['roc_auc']:.3f}, F1 {b['clf_incident_rule']['f1']:.3f}")
+    log(f"Delay minutes ({r['best']}): MAE {r['test']['mae']:.2f} | global median {b['reg_global_median']['mae']:.2f} "
+        f"| incident-type median {b['reg_incident_median']['mae']:.2f}")
+    for name, row in ab.items():
+        log(f"Without {name:14s}: ROC-AUC {row['roc_auc']:.3f}, MAE {row['mae']:.2f}")
 
 
 if __name__ == "__main__":

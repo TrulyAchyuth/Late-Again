@@ -1,173 +1,109 @@
 """
 predict_tools.py
 ----------------
-Helper functions the dashboard uses to make predictions:
+Everything the dashboard needs to make and explain a prediction for ONE incident.
 
-    make_trip()      turn simple user inputs into the exact columns the model needs
-    predict()        chance of delay + expected minutes for one trip
-    explain()        "why this prediction?" - how much each group of factors adds
-    what_if()        change ONE input step by step and watch the prediction move
-    plan_routes()    compare every route under the same conditions
-
-All of these only call the trained models. They do not change them.
+    make_row()    turn simple form inputs into the exact columns the models expect
+    predict()     chance of a major delay + expected delay in minutes
+    explain()     how much each group of inputs (incident, route, time, weather, events)
+                  moved the prediction away from a typical incident (Shapley values)
+    what_if()     change one input step by step and watch the prediction move
 """
 
 import datetime as dt
 import itertools
 import math
 
+import holidays
 import pandas as pd
 
-from config import FEATURES
+from config import INCIDENT_FEATURES
+from features import RUSH_HOURS
 
-PEAK_HOURS = (7, 8, 9, 17, 18, 19)
-
-# A "typical calm trip" used as the reference point in explain().
-# Weekday midday, clear weather, no event, normal traffic.
+# A "typical" incident: the most common values in the data (weekday noon, mild, dry)
 TYPICAL = {
-    "weather_condition": "Clear", "temperature_c": 15.0, "humidity_pct": 60.0,
-    "wind_speed_kmh": 12.0, "precipitation_mm": 0.0,
-    "event_type": "No Event", "event_attendance": 0,
-    "traffic_congestion_index": 3.0,
-    "hour": 12, "weekday_offset": 0, "is_holiday": False,
+    "incident": "Mechanical", "route": "32", "direction": "N", "at_station": 0,
+    "date": dt.date(2024, 5, 15), "hour": 12, "game": 0,
+    "weather": "Cloudy", "temperature_c": 10.0, "precipitation_mm": 0.0, "snowfall_cm": 0.0,
+    "snow_depth_cm": 0.0, "wind_kmh": 12.0, "gust_kmh": 25.0,
 }
 
-# Which inputs belong to which group in the explanation
+# Inputs grouped the way a person thinks about them
 GROUPS = {
-    "Weather": ["weather_condition", "temperature_c", "humidity_pct", "wind_speed_kmh", "precipitation_mm"],
-    "City event": ["event_type", "event_attendance"],
-    "Traffic": ["traffic_congestion_index"],
-    "Time & day": ["hour", "date", "is_holiday"],
+    "Incident type": ["incident"],
+    "Route & place": ["route", "direction", "at_station"],
+    "Time & day": ["date", "hour"],
+    "Weather": ["weather", "temperature_c", "precipitation_mm", "snowfall_cm", "snow_depth_cm",
+                "wind_kmh", "gust_kmh"],
+    "Blue Jays game": ["game"],
 }
 
-
-def season_of(month: int) -> str:
-    return {12: "Winter", 1: "Winter", 2: "Winter", 3: "Spring", 4: "Spring", 5: "Spring",
-            6: "Summer", 7: "Summer", 8: "Summer"}.get(month, "Autumn")
+_ON_HOLIDAYS = holidays.CA(subdiv="ON", years=range(2020, 2031))
 
 
-def make_trip(inputs: dict, routes: pd.DataFrame) -> pd.DataFrame:
-    """
-    inputs: dict with route_id, date (datetime.date), hour, is_holiday, weather values,
-            event_type, event_attendance, traffic_congestion_index
-    routes: DataFrame indexed by route_id with transport_type, distance_km, scheduled_duration_min
-    Returns a one-row DataFrame with the model's feature columns.
-    """
-    route = routes.loc[inputs["route_id"]]
+def make_row(inputs: dict) -> dict:
     date = inputs["date"]
-    is_weekend = int(date.weekday() >= 5)
-    is_holiday = int(bool(inputs["is_holiday"]))
-    no_event = inputs["event_type"] == "No Event"
-    row = {
-        "transport_type": route["transport_type"],
-        "route_id": inputs["route_id"],
-        "weather_condition": inputs["weather_condition"],
-        "event_type": inputs["event_type"],
-        "season": season_of(date.month),
-        "day_of_week": date.strftime("%A"),
-        "hour": int(inputs["hour"]),
-        "month": date.month,
-        "is_weekend": is_weekend,
-        "is_holiday": is_holiday,
-        "is_peak_hour": int(inputs["hour"] in PEAK_HOURS and not is_weekend and not is_holiday),
-        "distance_km": route["distance_km"],
-        "scheduled_duration_min": route["scheduled_duration_min"],
-        "temperature_c": inputs["temperature_c"],
-        "humidity_pct": inputs["humidity_pct"],
-        "wind_speed_kmh": inputs["wind_speed_kmh"],
-        "precipitation_mm": inputs["precipitation_mm"],
-        "event_attendance": 0 if no_event else inputs["event_attendance"],
-        "traffic_congestion_index": inputs["traffic_congestion_index"],
+    hour = int(inputs["hour"])
+    weekend = int(date.weekday() >= 5)
+    holiday = int(date in _ON_HOLIDAYS)
+    return {
+        "incident": inputs["incident"], "route": str(inputs["route"]), "direction": inputs["direction"],
+        "weather": inputs["weather"], "day_of_week": date.strftime("%A"),
+        "hour": hour, "month": date.month, "is_weekend": weekend, "is_holiday": holiday,
+        "is_rush_hour": int(hour in RUSH_HOURS and not weekend and not holiday),
+        "at_station": int(inputs["at_station"]),
+        "temperature_c": inputs["temperature_c"], "precipitation_mm": inputs["precipitation_mm"],
+        "snowfall_cm": inputs["snowfall_cm"], "snow_depth_cm": inputs["snow_depth_cm"],
+        "wind_kmh": inputs["wind_kmh"], "gust_kmh": inputs["gust_kmh"],
+        "jays_game_window": int(inputs["game"]),
     }
-    return pd.DataFrame([row])[FEATURES]
 
 
-def predict(clf, reg, inputs, routes):
-    """Return (probability of delay, expected delay in minutes)."""
-    trip = make_trip(inputs, routes)
-    return float(clf.predict_proba(trip)[0, 1]), float(reg.predict(trip)[0])
+def to_frame(list_of_inputs) -> pd.DataFrame:
+    return pd.DataFrame([make_row(i) for i in list_of_inputs])[INCIDENT_FEATURES]
 
 
-def _typical_inputs(inputs: dict) -> dict:
-    """Same route and month, but everything else set to a typical calm trip."""
-    calm = dict(inputs)
-    for key in ["weather_condition", "temperature_c", "humidity_pct", "wind_speed_kmh",
-                "precipitation_mm", "event_type", "event_attendance",
-                "traffic_congestion_index", "hour", "is_holiday"]:
-        calm[key] = TYPICAL[key]
-    # Move the date to a Wednesday in the same week, so it is a normal weekday
-    d = inputs["date"]
-    calm["date"] = d + dt.timedelta(days=2 - d.weekday())
-    return calm
+def predict(clf, reg, inputs: dict):
+    X = to_frame([inputs])
+    return float(clf.predict_proba(X)[0, 1]), max(float(reg.predict(X)[0]), 0.0)
 
 
-def explain(reg, inputs: dict, routes) -> pd.DataFrame:
+def explain(reg, inputs: dict) -> pd.DataFrame:
     """
-    "Why this prediction?" for the expected delay in minutes.
-
-    1. Start from the same route on a typical calm day (the reference).
-    2. Switch groups of factors (weather, event, traffic, time) from "typical"
-       to "your trip" and see how the predicted delay changes.
-    3. The order we switch them in matters a little, so we try ALL orders and
-       average (this fair-sharing idea is called a Shapley value).
-    The contributions add up exactly: reference + contributions = prediction.
+    Start from a typical incident and switch groups of inputs to "your incident".
+    Each group's bar is its average effect over every order of switching (a Shapley
+    value), so the bars add up exactly to the prediction.
     """
-    calm = _typical_inputs(inputs)
-    groups = list(GROUPS)
-
-    # Predict every combination of "typical" vs "your trip" groups (2^4 = 16 rows)
-    combos = list(itertools.product([0, 1], repeat=len(groups)))
+    names = list(GROUPS)
+    combos = list(itertools.product([0, 1], repeat=len(names)))
     rows = []
     for combo in combos:
-        mixed = dict(calm)
-        for use_trip, group in zip(combo, groups):
-            if use_trip:
-                for k in GROUPS[group]:
-                    mixed[k] = inputs[k]
-        rows.append(make_trip(mixed, routes))
-    preds = dict(zip(combos, reg.predict(pd.concat(rows, ignore_index=True))))
+        mixed = dict(TYPICAL)
+        for use_yours, group in zip(combo, names):
+            if use_yours:
+                for key in GROUPS[group]:
+                    mixed[key] = inputs[key]
+        rows.append(mixed)
+    preds = dict(zip(combos, reg.predict(to_frame(rows))))
 
-    n = len(groups)
-    result = [{"factor": "Route on a typical calm day", "minutes": float(preds[(0,) * n])}]
-    for i, group in enumerate(groups):
+    n = len(names)
+    out = [{"factor": "Typical incident", "minutes": float(preds[(0,) * n])}]
+    for i, group in enumerate(names):
         total = 0.0
         for combo in combos:
-            if combo[i] == 1:
+            if combo[i]:
                 continue
-            with_i = combo[:i] + (1,) + combo[i + 1:]
-            k = sum(combo)  # how many other groups are already "your trip"
+            k = sum(combo)
             weight = math.factorial(k) * math.factorial(n - k - 1) / math.factorial(n)
-            total += weight * (preds[with_i] - preds[combo])
-        result.append({"factor": group, "minutes": float(total)})
-    result.append({"factor": "Predicted delay", "minutes": float(preds[(1,) * n])})
-    return pd.DataFrame(result)
+            total += weight * (preds[combo[:i] + (1,) + combo[i + 1:]] - preds[combo])
+        out.append({"factor": group, "minutes": float(total)})
+    out.append({"factor": "Your incident", "minutes": float(preds[(1,) * n])})
+    return pd.DataFrame(out)
 
 
-def what_if(clf, reg, inputs: dict, routes, feature: str, values) -> pd.DataFrame:
-    """Predict the trip again for each value of one input, keeping the rest fixed."""
-    rows = []
-    for v in values:
-        changed = dict(inputs)
-        changed[feature] = v
-        prob, minutes = predict(clf, reg, changed, routes)
-        rows.append({feature: v, "chance_of_delay": prob, "expected_delay_min": minutes})
-    return pd.DataFrame(rows)
-
-
-def plan_routes(clf, reg, inputs: dict, routes, route_ids=None) -> pd.DataFrame:
-    """Same conditions, every route: which one is likely to be least delayed?"""
-    rows = []
-    for rid in (route_ids if route_ids is not None else routes.index):
-        changed = dict(inputs, route_id=rid)
-        prob, minutes = predict(clf, reg, changed, routes)
-        sched = float(routes.loc[rid, "scheduled_duration_min"])
-        rows.append({
-            "route": rid,
-            "type": routes.loc[rid, "transport_type"],
-            "distance_km": routes.loc[rid, "distance_km"],
-            "scheduled_min": round(sched),
-            "chance_of_delay_%": round(prob * 100),
-            "expected_delay_min": round(minutes, 1),
-            "expected_total_min": round(sched + max(minutes, 0), 1),
-        })
-    return pd.DataFrame(rows).sort_values("expected_delay_min").reset_index(drop=True)
+def what_if(clf, reg, inputs: dict, key: str, values) -> pd.DataFrame:
+    rows = [dict(inputs, **{key: v}) for v in values]
+    X = to_frame(rows)
+    return pd.DataFrame({key: list(values),
+                         "major_chance": clf.predict_proba(X)[:, 1],
+                         "expected_delay": reg.predict(X).clip(min=0)})
