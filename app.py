@@ -1,7 +1,7 @@
 """
 app.py
 ------
-Streamlit dashboard for the "Public Transport Delays with Weather & Events" project.
+Streamlit dashboard for "Late Again": Public Transport Delays with Weather & Events.
 
 Run (from the project folder, after running the pipeline):
     streamlit run app.py
@@ -28,7 +28,7 @@ from config import (CLEAN_DATA, EVENT_ORDER, FIGURES_DIR, MODELS_DIR,  # noqa: E
                     REPORTS_DIR, WEATHER_ORDER)
 from predict_tools import explain, plan_routes, predict, what_if  # noqa: E402
 
-st.set_page_config(page_title="Transit Delay Predictor", page_icon="🚌", layout="wide")
+st.set_page_config(page_title="Late Again", page_icon="🚌", layout="wide")
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +81,7 @@ df_all = load_data()
 # ---------------------------------------------------------------------------
 # Sidebar
 # ---------------------------------------------------------------------------
-st.sidebar.title("🚌 Transit Delays")
+st.sidebar.title("🚌 Late Again")
 st.sidebar.warning("All data in this app is **synthetic** (computer-generated). "
                    "Patterns shown are not real-world statistics.")
 types = sorted(df_all["transport_type"].unique())
@@ -89,7 +89,8 @@ chosen_types = st.sidebar.multiselect("Transport types", types, default=types)
 df = df_all[df_all["transport_type"].isin(chosen_types)]
 st.sidebar.caption(f"Showing {len(df):,} of {len(df_all):,} trips")
 
-st.title("Public Transport Delays with Weather & Events")
+st.title("🚌 Late Again")
+st.caption("Public Transport Delays with Weather & Events")
 
 if df.empty:
     st.info("Select at least one transport type in the sidebar.")
