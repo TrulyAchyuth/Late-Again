@@ -1,3 +1,0 @@
-# Extra tools for development only (not needed by the hosted app)
--r requirements.txt
-notebook==7.6.5
