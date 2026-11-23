@@ -1,0 +1,133 @@
+{
+  "best_classifier": "Gradient Boosting",
+  "best_regressor": "Gradient Boosting",
+  "delay_threshold_min": 5,
+  "baselines": {
+    "classification_majority_class_accuracy": 0.5317,
+    "regression_predict_mean_mae": 5.6452
+  },
+  "train_rows": 4800,
+  "test_rows": 1200,
+  "routes": [
+    {
+      "route_id": "Route_1",
+      "transport_type": "Bus",
+      "distance_km": 17.9,
+      "scheduled_duration_min": 54.0
+    },
+    {
+      "route_id": "Route_10",
+      "transport_type": "Train",
+      "distance_km": 66.7,
+      "scheduled_duration_min": 73.0
+    },
+    {
+      "route_id": "Route_11",
+      "transport_type": "Train",
+      "distance_km": 22.6,
+      "scheduled_duration_min": 25.0
+    },
+    {
+      "route_id": "Route_12",
+      "transport_type": "Train",
+      "distance_km": 61.0,
+      "scheduled_duration_min": 67.0
+    },
+    {
+      "route_id": "Route_13",
+      "transport_type": "Train",
+      "distance_km": 39.5,
+      "scheduled_duration_min": 43.0
+    },
+    {
+      "route_id": "Route_14",
+      "transport_type": "Tram",
+      "distance_km": 7.8,
+      "scheduled_duration_min": 26.0
+    },
+    {
+      "route_id": "Route_15",
+      "transport_type": "Tram",
+      "distance_km": 7.8,
+      "scheduled_duration_min": 26.0
+    },
+    {
+      "route_id": "Route_16",
+      "transport_type": "Tram",
+      "distance_km": 9.4,
+      "scheduled_duration_min": 31.0
+    },
+    {
+      "route_id": "Route_17",
+      "transport_type": "Tram",
+      "distance_km": 9.6,
+      "scheduled_duration_min": 32.0
+    },
+    {
+      "route_id": "Route_18",
+      "transport_type": "Metro",
+      "distance_km": 21.8,
+      "scheduled_duration_min": 37.0
+    },
+    {
+      "route_id": "Route_19",
+      "transport_type": "Metro",
+      "distance_km": 11.5,
+      "scheduled_duration_min": 20.0
+    },
+    {
+      "route_id": "Route_2",
+      "transport_type": "Bus",
+      "distance_km": 6.4,
+      "scheduled_duration_min": 19.0
+    },
+    {
+      "route_id": "Route_20",
+      "transport_type": "Metro",
+      "distance_km": 8.7,
+      "scheduled_duration_min": 15.0
+    },
+    {
+      "route_id": "Route_3",
+      "transport_type": "Bus",
+      "distance_km": 16.8,
+      "scheduled_duration_min": 50.0
+    },
+    {
+      "route_id": "Route_4",
+      "transport_type": "Bus",
+      "distance_km": 11.8,
+      "scheduled_duration_min": 35.0
+    },
+    {
+      "route_id": "Route_5",
+      "transport_type": "Bus",
+      "distance_km": 14.7,
+      "scheduled_duration_min": 44.0
+    },
+    {
+      "route_id": "Route_6",
+      "transport_type": "Bus",
+      "distance_km": 11.7,
+      "scheduled_duration_min": 35.0
+    },
+    {
+      "route_id": "Route_7",
+      "transport_type": "Bus",
+      "distance_km": 6.0,
+      "scheduled_duration_min": 18.0
+    },
+    {
+      "route_id": "Route_8",
+      "transport_type": "Bus",
+      "distance_km": 14.5,
+      "scheduled_duration_min": 44.0
+    },
+    {
+      "route_id": "Route_9",
+      "transport_type": "Train",
+      "distance_km": 78.2,
+      "scheduled_duration_min": 85.0
+    }
+  ]
+}
