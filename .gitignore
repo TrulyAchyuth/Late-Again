@@ -3,4 +3,7 @@ __pycache__/
 .venv/
 venv/
 .ipynb_checkpoints/
+.pytest_cache/
 .DS_Store
+# raw downloads are large and can be re-downloaded with src/download_data.py
+data/raw/
