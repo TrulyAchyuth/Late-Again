@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Run unit tests (features, cleaning, analysis, models, app start-up)
+        run: python -m pytest -v
+
+      - name: Retrain from the committed data and check the scores did not drop
+        run: |
+          python run_pipeline.py --offline
+          python -c "import json; m = json.load(open('reports/metrics.json')); \
+          assert m['regressor']['test']['mae'] < m['baselines']['reg_global_median']['mae'], 'model worse than baseline'; \
+          assert m['classifier']['test']['roc_auc'] > 0.75, 'ROC-AUC dropped'; print('Scores OK')"
