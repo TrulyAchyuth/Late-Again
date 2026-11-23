@@ -116,17 +116,16 @@ To open the EDA notebook: `pip install -r requirements-dev.txt`, then `jupyter n
 
 ### Host it for free on Streamlit Community Cloud
 
-1. Create an empty repository on GitHub (e.g. `late-again`), public or private.
+The code lives at **<https://github.com/TrulyAchyuth/Late-Again>**.
+
+1. (Only if you are setting up your own copy) create an empty GitHub repository.
 2. Push this folder to it:
    ```bash
-   git init -b main          # skip if the folder is already a git repo
-   git add .
-   git commit -m "Late Again: transit delay ML project"
-   git remote add origin https://github.com/<your-username>/late-again.git
+   git remote add origin https://github.com/TrulyAchyuth/Late-Again.git
    git push -u origin main
    ```
 3. Go to <https://share.streamlit.io>, sign in with GitHub and click **Create app → Deploy a public app from GitHub**.
-4. Choose the repository, branch `main` and main file `app.py`.
+4. Choose the repository `TrulyAchyuth/Late-Again`, branch `main` and main file `app.py`.
 5. Open **Advanced settings** and choose **Python 3.13**, then click **Deploy**.
 6. After a few minutes you get a public link like `https://<name>.streamlit.app`.
 
