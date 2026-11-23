@@ -1,9 +1,11 @@
 """
 app.py
 ------
-Streamlit dashboard for "Late Again": Public Transport Delays with Weather & Events.
+Late Again: a dashboard about real Toronto bus delays (TTC, 2023-2024),
+the weather and events around them, and a model that predicts how long a
+reported incident will hold the next bus up.
 
-Run (from the project folder, after running the pipeline):
+Run:
     streamlit run app.py
 """
 
@@ -15,48 +17,44 @@ import warnings
 from pathlib import Path
 
 import joblib
-import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 from sklearn.exceptions import InconsistentVersionWarning
 
-# Let us import our own modules from the src/ folder
-sys.path.append(str(Path(__file__).resolve().parent / "src"))
+ROOT = Path(__file__).resolve().parent
+sys.path.append(str(ROOT / "src"))
+import analysis  # noqa: E402
 import live_weather  # noqa: E402
 import plots  # noqa: E402
-from config import (CLEAN_DATA, EVENT_ORDER, FIGURES_DIR, MODELS_DIR,  # noqa: E402
-                    REPORTS_DIR, WEATHER_ORDER)
-from predict_tools import explain, plan_routes, predict, what_if  # noqa: E402
+from config import (HOURLY_FILE, INCIDENTS_FILE, MAJOR_DELAY_MIN, METRICS_FILE,  # noqa: E402
+                    MODELS_DIR, REPORTS_DIR, TTC_DATASET_PAGE, WEATHER_ORDER)
+from predict_tools import TYPICAL, explain, predict, what_if  # noqa: E402
 
-st.set_page_config(page_title="Late Again", page_icon="🚌", layout="wide")
+st.set_page_config(page_title="Late Again · Toronto bus delays", page_icon="🚌", layout="wide")
+st.markdown(f"<style>{(ROOT / 'assets' / 'style.css').read_text()}</style>", unsafe_allow_html=True)
+CHART = {"displayModeBar": False}
 
 
 # ---------------------------------------------------------------------------
-# Loading data and models (cached so they load only once)
+# Data and models (cached: loaded once per server)
 # ---------------------------------------------------------------------------
 @st.cache_data
 def load_data():
-    return pd.read_csv(CLEAN_DATA, keep_default_na=False, na_values=[""])
-
-
-def build_project():
-    """Run the whole pipeline (data -> models). Used when the models are missing
-    or were saved with a different scikit-learn version (e.g. on a new server)."""
-    root = Path(__file__).resolve().parent
-    cmd = [sys.executable, str(root / "run_pipeline.py")]
-    if (root / "data" / "raw" / "public_transport_delays.csv").exists():
-        cmd.append("--skip-generate")
-    subprocess.run(cmd, check=True, cwd=root)
+    inc = pd.read_csv(INCIDENTS_FILE, parse_dates=["timestamp"], dtype={"route": str})
+    hourly = pd.read_csv(HOURLY_FILE, parse_dates=["hour_ts"])
+    preds = pd.read_csv(REPORTS_DIR / "test_predictions.csv.gz")
+    importance = pd.read_csv(REPORTS_DIR / "feature_importance.csv")
+    metrics = json.loads(METRICS_FILE.read_text())
+    return inc, hourly, preds, importance, metrics
 
 
 def _read_models():
-    # Turn "model saved with another scikit-learn version" into an error we can catch
-    with warnings.catch_warnings():
+    with warnings.catch_warnings():   # a model saved by another scikit-learn version -> retrain
         warnings.simplefilter("error", InconsistentVersionWarning)
-        clf = joblib.load(MODELS_DIR / "best_classifier.joblib")
-        reg = joblib.load(MODELS_DIR / "best_regressor.joblib")
-    meta = json.loads((MODELS_DIR / "app_metadata.json").read_text())
-    return clf, reg, meta
+        clf = joblib.load(MODELS_DIR / "major_delay_classifier.joblib")
+        reg = joblib.load(MODELS_DIR / "delay_regressor.joblib")
+    medians = joblib.load(MODELS_DIR / "incident_medians.joblib")
+    return clf, reg, medians
 
 
 @st.cache_resource
@@ -64,250 +62,249 @@ def load_models():
     try:
         return _read_models()
     except Exception:
-        with st.spinner("Training the models for the first time on this computer (about 30 seconds)..."):
-            build_project()
+        with st.spinner("Training the models on this machine (about a minute)..."):
+            subprocess.run([sys.executable, str(ROOT / "src" / "train.py")], check=True, cwd=ROOT / "src")
         return _read_models()
 
 
-def show(fig):
-    """Display a Matplotlib figure and free its memory."""
-    st.pyplot(fig)
-    plt.close(fig)
+inc, hourly, preds, importance, metrics = load_data()
+clf, reg, incident_medians = load_models()
+k = analysis.kpis(inc)
 
 
-clf, reg, meta = load_models()   # also builds data + models if they are missing
-df_all = load_data()
+def stat(value, label, kind=""):
+    return f'<div class="stat {kind}"><div class="value">{value}</div><div class="label">{label}</div></div>'
+
+
+def stats_row(*cards):
+    st.markdown('<div class="stats">' + "".join(cards) + "</div>", unsafe_allow_html=True)
+
+
+def finding(text, kind=""):
+    st.markdown(f'<div class="finding {kind}">{text}</div>', unsafe_allow_html=True)
+
 
 # ---------------------------------------------------------------------------
-# Sidebar
+# Sidebar: where the data comes from
 # ---------------------------------------------------------------------------
-st.sidebar.title("🚌 Late Again")
-st.sidebar.warning("All data in this app is **synthetic** (computer-generated). "
-                   "Patterns shown are not real-world statistics.")
-types = sorted(df_all["transport_type"].unique())
-chosen_types = st.sidebar.multiselect("Transport types", types, default=types)
-df = df_all[df_all["transport_type"].isin(chosen_types)]
-st.sidebar.caption(f"Showing {len(df):,} of {len(df_all):,} trips")
+with st.sidebar:
+    st.markdown("### About the data")
+    st.markdown(
+        f"""
+**{k['incidents']:,} real delay incidents** reported on Toronto's TTC bus network,
+{k['first']:%b %Y} to {k['last']:%b %Y}.
 
-st.title("🚌 Late Again")
-st.caption("Public Transport Delays with Weather & Events")
+- Delays: [TTC Bus Delay Data]({TTC_DATASET_PAGE}), City of Toronto Open Data
+  (Open Government Licence – Toronto)
+- Weather: hourly, downtown Toronto, [Open-Meteo](https://open-meteo.com) (CC BY 4.0)
+- Events: Blue Jays home games at Rogers Centre, MLB Stats API
+- Holidays: Ontario public holidays
 
-if df.empty:
-    st.info("Select at least one transport type in the sidebar.")
-    st.stop()
+Each row is an **incident** (a breakdown, a diversion, a security call...), not a
+trip. "Delay" is how late it made the next bus.
 
-tabs = st.tabs(["📊 Overview", "🛣️ Routes", "🌧️ Weather", "🎉 Events",
-                "⏰ Peak hours", "🤖 Model results", "🔮 Predict & plan"])
+Independent student project, not affiliated with the TTC.
+"""
+    )
+
+# ---------------------------------------------------------------------------
+# Hero
+# ---------------------------------------------------------------------------
+st.markdown(
+    f"""
+<div class="hero">
+  <h1>Late again.</h1>
+  <p>Toronto's buses logged <strong>{k['incidents']:,} delay incidents</strong> in 2023 and 2024.
+  Half of them held the next bus up <strong>{k['median_delay']:.0f} minutes or more</strong>,
+  and {k['major_share']:.0%} caused a major delay of {MAJOR_DELAY_MIN}+ minutes.
+  What makes it worse: the snow, the route, or the time of night?</p>
+  <div class="source">Real TTC open data, joined with hourly weather and city events.</div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
+tabs = st.tabs(["Overview", "When it happens", "Routes & causes", "Weather & events",
+                "How good is the model", "Predict an incident"])
 
 # ---- Overview ----
 with tabs[0]:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Trips", f"{len(df):,}")
-    c2.metric("Mean delay", f"{df['arrival_delay_min'].mean():.1f} min")
-    c3.metric("Median delay", f"{df['arrival_delay_min'].median():.0f} min")
-    c4.metric(f"Delayed (> {meta['delay_threshold_min']} min)", f"{df['delayed'].mean():.0%}")
-    left, right = st.columns(2)
-    with left:
-        show(plots.delay_distribution(df))
-    with right:
-        show(plots.delay_by_transport(df))
-    with st.expander("Show a sample of the data"):
-        st.dataframe(df.head(200), width="stretch")
+    per_day = len(inc) / inc["timestamp"].dt.normalize().nunique()
+    stats_row(stat(f"{per_day:.0f}", "incidents on an average day"),
+              stat(f"{k['median_delay']:.0f} min", "median delay to the next bus"),
+              stat(f"{k['major_share']:.0%}", f"incidents with a {MAJOR_DELAY_MIN}+ min delay", "late"),
+              stat(f"{k['routes']}", "routes with at least one incident"))
+    left, right = st.columns([3, 2])
+    left.plotly_chart(plots.monthly_trend(inc), width="stretch", config=CHART)
+    right.plotly_chart(plots.delay_histogram(inc), width="stretch", config=CHART)
 
-# ---- Routes ----
+# ---- When ----
 with tabs[1]:
-    show(plots.delay_by_route(df))
-    route_table = (df.groupby(["route_id", "transport_type"])
-                     .agg(trips=("trip_id", "count"),
-                          mean_delay=("arrival_delay_min", "mean"),
-                          pct_delayed=("delayed", "mean"))
-                     .sort_values("mean_delay", ascending=False).reset_index())
-    route_table["mean_delay"] = route_table["mean_delay"].round(2)
-    route_table["pct_delayed"] = (route_table["pct_delayed"] * 100).round(1)
-    st.dataframe(route_table, width="stretch", hide_index=True)
+    table = analysis.hour_weekday_table(hourly, "incidents")
+    st.plotly_chart(plots.heatmap(table, "Incidents per hour, by weekday and hour",
+                                  [[0, "#FFFFFF"], [1, plots.ASPHALT]], "incidents/h"),
+                    width="stretch", config=CHART)
+    major = inc.pivot_table(index="day_of_week", columns="hour", values="major_delay", aggfunc="mean") * 100
+    st.plotly_chart(plots.heatmap(major, "Share of incidents that become major delays (%)",
+                                  [[0, "#FFFFFF"], [1, plots.LATE]], "% major"),
+                    width="stretch", config=CHART)
+    night = inc[inc["hour"].isin([0, 1, 2, 3, 4])]["major_delay"].mean()
+    rush = inc[inc["is_rush_hour"] == 1]["major_delay"].mean()
+    finding(f"Rush hours have the <b>most</b> incidents, but late night has the <b>worst</b> ones: "
+            f"{night:.0%} of incidents between midnight and 5 am become major delays, against {rush:.0%} "
+            f"in weekday rush hours. Night buses run less often, so one problem leaves a longer gap.", "late")
 
-# ---- Weather ----
+# ---- Routes & causes ----
 with tabs[2]:
-    show(plots.delay_by_weather(df))
-    st.caption("In this synthetic data, storms, heavy rain and snow were set up to add the most delay, "
-               "and metro lines were set up to be least affected.")
-
-# ---- Events ----
-with tabs[3]:
-    show(plots.delay_by_event(df))
-    ev = df[df["event_type"] != "No Event"]
-    if not ev.empty:
-        st.write(f"Trips during an event: **{len(ev):,}**, mean delay "
-                 f"**{ev['arrival_delay_min'].mean():.1f} min** vs "
-                 f"**{df[df['event_type'] == 'No Event']['arrival_delay_min'].mean():.1f} min** without.")
-
-# ---- Peak hours ----
-with tabs[4]:
-    show(plots.delay_by_hour(df))
-    show(plots.hour_weekday_heatmap(df))
-
-# ---- Model results ----
-with tabs[5]:
-    st.subheader("How well do the models predict?")
-    st.write(f"Models were trained on {meta['train_rows']:,} trips and tested on "
-             f"{meta['test_rows']:,} trips they had never seen. Numbers below come from "
-             "`reports/` and are produced by `src/train.py`.")
-    b = meta["baselines"]
-    st.info(f"Baselines without ML: always guessing the most common class gives "
-            f"accuracy {b['classification_majority_class_accuracy']:.3f}; always guessing the average delay "
-            f"gives MAE {b['regression_predict_mean_mae']:.2f} min.")
-
     left, right = st.columns(2)
-    with left:
-        st.markdown(f"**Classification** (best: {meta['best_classifier']})")
-        st.dataframe(pd.read_csv(REPORTS_DIR / "metrics_classification.csv"), hide_index=True)
-        st.image(str(FIGURES_DIR / "11_confusion_matrix.png"))
-    with right:
-        st.markdown(f"**Regression** (best: {meta['best_regressor']})")
-        st.dataframe(pd.read_csv(REPORTS_DIR / "metrics_regression.csv"), hide_index=True)
-        preds = pd.read_csv(REPORTS_DIR / "test_predictions.csv")
-        preds = preds[preds["transport_type"].isin(chosen_types)]
-        if not preds.empty:
-            show(plots.actual_vs_predicted(preds))
-    st.image(str(FIGURES_DIR / "12_feature_importance.png"), width=600)
+    left.plotly_chart(plots.route_bars(analysis.route_table(inc)), width="stretch", config=CHART)
+    right.plotly_chart(plots.incident_bars(analysis.incident_table(inc)), width="stretch", config=CHART)
+    with st.expander("All routes with 200+ incidents"):
+        rt = analysis.route_table(inc)
+        rt["major_share"] = (rt["major_share"] * 100).round(1)
+        st.dataframe(rt.rename(columns={"major_share": "% major", "median_delay": "median delay (min)"}),
+                     hide_index=True, width="stretch")
 
+# ---- Weather & events ----
+with tabs[3]:
+    st.markdown("Each bar compares the number of incidents in those hours with a **normal hour at the same "
+                "time of the week** (same year, weekday and hour). 1.0 means no difference. Thin lines "
+                "show a 90% bootstrap range: wide ranges mean only a few hours had that weather.")
+    binned = analysis.snow_and_rain_bins(hourly)
+    snow = analysis.compare_to_expected(binned, "snowfall")
+    rain = analysis.compare_to_expected(binned, "rainfall")
+    left, right = st.columns(2)
+    left.plotly_chart(plots.ratio_chart(snow, "snowfall", "Snowfall"), width="stretch", config=CHART)
+    right.plotly_chart(plots.ratio_chart(rain, "rainfall", "Rain"), width="stretch", config=CHART)
+    heavy = snow[snow["snowfall"] == "Heavy (>1.5)"].iloc[0]
+    finding(f"Snow is the clearest weather effect in the data. In the {heavy['hours']:.0f} hours with heavy "
+            f"snowfall the network logged <b>{heavy['ratio']:.1f}x</b> the usual number of incidents. "
+            f"Moderate rain adds about {rain.loc[rain['rainfall'] == 'Moderate (1-4)', 'ratio'].iloc[0] - 1:.0%}.",
+            "late")
+    games = analysis.compare_to_expected(hourly.assign(
+        when=hourly["jays_game_window"].map({0: "No game", 1: "Blue Jays home game (1 h before to 4 h after)"})), "when")
+    hols = analysis.compare_to_expected(hourly.assign(
+        when=hourly["is_holiday"].map({0: "Regular day", 1: "Ontario public holiday"})), "when")
+    left, right = st.columns(2)
+    left.plotly_chart(plots.ratio_chart(games, "when", "Blue Jays home games"), width="stretch", config=CHART)
+    right.plotly_chart(plots.ratio_chart(hols, "when", "Public holidays"), width="stretch", config=CHART)
+    finding("Blue Jays games made <b>no measurable difference</b> to the number of incidents. "
+            "Public holidays have about 40% fewer, because fewer buses run.", "calm")
+    finding("Weather changes <b>how many</b> incidents happen, but not <b>how long</b> each one lasts: "
+            "retraining the delay model without any weather inputs left its 2024 error unchanged "
+            f"({metrics['ablation']['weather inputs']['mae']:.2f} vs {metrics['regressor']['test']['mae']:.2f} min).")
 
-# ---- Prediction, explanation, what-if and route planner ----
-routes = pd.DataFrame(meta["routes"]).set_index("route_id")
-route_labels = {rid: f"{rid} ({r.transport_type}, {r.distance_km} km)" for rid, r in routes.iterrows()}
+# ---- Model ----
+with tabs[4]:
+    c, r, b = metrics["classifier"], metrics["regressor"], metrics["baselines"]
+    rows = metrics["rows"]
+    st.markdown(f"Trained on Jan–Sep 2023 ({rows['train']:,} incidents), model chosen on Oct–Dec 2023 "
+                f"({rows['valid']:,}), then refit on all of 2023 and **tested once on all of 2024** "
+                f"({rows['test']:,} incidents it had never seen). No random shuffling, so the model "
+                "is always predicting the future from the past.")
+    gain = 1 - r["test"]["mae"] / b["reg_global_median"]["mae"]
+    stats_row(stat(f"{r['test']['mae']:.1f} min", f"average error, delay model ({r['best']})", "signal"),
+              stat(f"{gain:.0%}", f"less error than guessing the median ({b['reg_global_median']['mae']:.1f} min)", "calm"),
+              stat(f"{c['test']['roc_auc']:.2f}", f"ROC-AUC, major-delay model (rule of thumb: {b['clf_incident_rule']['roc_auc']:.2f})"),
+              stat(f"{c['test']['f1']:.2f}", f"F1 for major delays (rule of thumb: {b['clf_incident_rule']['f1']:.2f})"))
+    left, right = st.columns(2)
+    left.plotly_chart(plots.actual_vs_predicted(preds), width="stretch", config=CHART)
+    right.plotly_chart(plots.importance_bars(importance), width="stretch", config=CHART)
 
-# Default values for the input widgets, stored in st.session_state so that the
-# "live weather" button can overwrite them.
-DEFAULTS = {
-    "route_id": routes.index[0], "trip_date": dt.date.today(), "trip_time": dt.time(8, 0),
-    "is_holiday": False, "weather_condition": "Clear", "temperature_c": 15.0,
-    "humidity_pct": 65.0, "wind_speed_kmh": 12.0, "precipitation_mm": 0.0,
-    "event_type": "No Event", "event_attendance": 20_000, "traffic_congestion_index": 3.0,
-}
-for key, value in DEFAULTS.items():
-    st.session_state.setdefault(key, value)
+    st.markdown("#### Every model, on the validation months (Oct–Dec 2023)")
+    left, right = st.columns(2)
+    left.dataframe(pd.DataFrame(c["validation"]).set_index("model"), width="stretch")
+    right.dataframe(pd.DataFrame(r["validation"]).set_index("model"), width="stretch")
+    st.markdown("#### What happens if we take inputs away? (2024 test set)")
+    ab = pd.DataFrame(metrics["ablation"]).T.rename(columns={"roc_auc": "ROC-AUC (major delay)", "mae": "MAE (min)"})
+    ab.loc["nothing removed"] = [c["test"]["roc_auc"], r["test"]["mae"]]
+    st.dataframe(ab.iloc[::-1], width="stretch")
+    st.caption("The route matters most. Routes that run less often leave longer gaps when something goes wrong.")
 
+# ---- Predict ----
+with tabs[5]:
+    st.markdown("Describe an incident as a dispatcher would report it. The model estimates how late the "
+                "next bus will be. It learned from 2023 data, so treat it as an estimate, not a timetable.")
+    routes = analysis.route_table(inc, min_incidents=100)["route"].tolist()
+    incident_types = analysis.incident_table(inc)["incident"].tolist()
 
-def fill_live_weather():
-    """Button callback: download real weather and put it into the weather widgets."""
-    city = st.session_state["city"]
-    lat, lon = live_weather.CITIES[city]
-    try:
-        w = live_weather.get_weather(lat, lon, st.session_state["trip_date"],
-                                     st.session_state["trip_time"].hour)
-    except Exception as err:  # no internet, API down, date out of range...
-        st.session_state["weather_msg"] = ("error", f"Could not get live weather: {err}")
-        return
-    st.session_state["weather_condition"] = w["weather_condition"]
-    st.session_state["temperature_c"] = float(min(max(w["temperature_c"], -15), 40))
-    st.session_state["humidity_pct"] = float(min(max(w["humidity_pct"], 20), 100))
-    st.session_state["wind_speed_kmh"] = float(min(max(w["wind_speed_kmh"], 0), 100))
-    st.session_state["precipitation_mm"] = float(min(max(w["precipitation_mm"], 0), 50))
-    st.session_state["weather_msg"] = (
-        "success", f"Filled with Open-Meteo weather for {city} at {w['time']} "
-                   f"({w['weather_condition']}, {w['temperature_c']:.1f} °C, "
-                   f"{w['precipitation_mm']:.1f} mm rain that day).")
+    defaults = {"incident": "Mechanical", "route": routes[0], "direction": "N", "at_station": False,
+                "date": dt.date.today(), "hour": 8, "game": False, "weather": "Cloudy",
+                "temperature_c": 5.0, "precipitation_mm": 0.0, "snowfall_cm": 0.0, "snow_depth_cm": 0.0,
+                "wind_kmh": 15.0, "gust_kmh": 30.0}
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
 
+    def fill_weather():
+        try:
+            w = live_weather.get_weather(st.session_state["date"], st.session_state["hour"])
+        except Exception as err:
+            st.session_state["weather_msg"] = ("error", f"Couldn't get weather from Open-Meteo: {err}. "
+                                                        "Enter it below instead.")
+            return
+        for key in ["weather", "temperature_c", "precipitation_mm", "snowfall_cm", "snow_depth_cm",
+                    "wind_kmh", "gust_kmh"]:
+            st.session_state[key] = w[key] if key == "weather" else round(float(w[key]), 1)
+        st.session_state["weather_msg"] = ("ok", f"Toronto weather for {w['time'].replace('T', ' ')}: "
+                                                 f"{w['weather'].lower()}, {w['temperature_c']:.0f} °C.")
 
-with tabs[6]:
-    st.subheader("Describe a trip")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("**Trip**")
-        st.selectbox("Route", routes.index, format_func=route_labels.get, key="route_id")
-        st.date_input("Date", key="trip_date")
-        st.time_input("Departure time", key="trip_time", step=3600)
-        st.checkbox("Public holiday", key="is_holiday")
-    with col2:
-        st.markdown("**Weather**")
-        with st.expander("🌐 Use real weather (Open-Meteo)"):
-            st.selectbox("City", list(live_weather.CITIES), key="city")
-            st.button("Fetch weather for this date & hour", on_click=fill_live_weather)
-            if "weather_msg" in st.session_state:
-                kind, text = st.session_state["weather_msg"]
-                (st.success if kind == "success" else st.error)(text)
-        st.selectbox("Condition", WEATHER_ORDER, key="weather_condition")
-        st.slider("Temperature (°C)", -15.0, 40.0, key="temperature_c")
-        st.slider("Humidity (%)", 20.0, 100.0, key="humidity_pct")
-        st.slider("Wind speed (km/h)", 0.0, 100.0, key="wind_speed_kmh")
-        st.slider("Precipitation that day (mm)", 0.0, 50.0, key="precipitation_mm")
-    with col3:
-        st.markdown("**Events & traffic**")
-        st.selectbox("City event", EVENT_ORDER, key="event_type")
-        st.slider("Expected attendance", 0, 60_000, step=1_000, key="event_attendance",
-                  disabled=(st.session_state["event_type"] == "No Event"))
-        st.slider("Traffic congestion (0 = empty, 10 = gridlock)", 0.0, 10.0, key="traffic_congestion_index")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("##### The incident")
+        st.selectbox("What happened", incident_types, key="incident")
+        st.selectbox("Route", routes, key="route")
+        st.selectbox("Direction", ["N", "S", "E", "W", "Unknown"], key="direction")
+        st.toggle("At a station", key="at_station")
+    with c2:
+        st.markdown("##### When")
+        st.date_input("Date", key="date")
+        st.slider("Hour of day", 0, 23, key="hour")
+        st.toggle("Blue Jays home game around this time", key="game")
+        st.button("Use Toronto weather for this date and hour", on_click=fill_weather)
+        if "weather_msg" in st.session_state:
+            kind, text = st.session_state["weather_msg"]
+            (st.success if kind == "ok" else st.warning)(text)
+    with c3:
+        st.markdown("##### Weather")
+        st.selectbox("Conditions", WEATHER_ORDER, key="weather")
+        st.number_input("Temperature (°C)", -35.0, 40.0, key="temperature_c", step=1.0)
+        st.number_input("Snowfall this hour (cm)", 0.0, 10.0, key="snowfall_cm", step=0.1)
+        st.number_input("Precipitation this hour (mm)", 0.0, 50.0, key="precipitation_mm", step=0.5)
+        with st.expander("More weather"):
+            st.number_input("Snow on the ground (cm)", 0.0, 100.0, key="snow_depth_cm", step=1.0)
+            st.number_input("Wind (km/h)", 0.0, 120.0, key="wind_kmh", step=1.0)
+            st.number_input("Gusts (km/h)", 0.0, 150.0, key="gust_kmh", step=1.0)
 
-    # Collect everything into one plain dict for predict_tools.py
-    ss = st.session_state
-    inputs = {
-        "route_id": ss["route_id"], "date": ss["trip_date"], "hour": ss["trip_time"].hour,
-        "is_holiday": ss["is_holiday"], "weather_condition": ss["weather_condition"],
-        "temperature_c": ss["temperature_c"], "humidity_pct": ss["humidity_pct"],
-        "wind_speed_kmh": ss["wind_speed_kmh"], "precipitation_mm": ss["precipitation_mm"],
-        "event_type": ss["event_type"], "event_attendance": ss["event_attendance"],
-        "traffic_congestion_index": ss["traffic_congestion_index"],
-    }
-    st.caption("Models were trained on synthetic data, so all numbers below are a demo, not a real forecast.")
+    inputs = {key: st.session_state[key] for key in defaults}
+    chance, minutes = predict(clf, reg, inputs)
+    typical = incident_medians.get(inputs["incident"], k["median_delay"])
+    stats_row(stat(f"{minutes:.0f} min", "expected delay to the next bus", "signal"),
+              stat(f"{chance:.0%}", f"chance of a major delay ({MAJOR_DELAY_MIN}+ min)",
+                   "late" if chance >= 0.5 else "calm"),
+              stat(f"{typical:.0f} min", f"typical for “{inputs['incident']}” across all routes"))
 
-    sub = st.tabs(["🎯 Prediction & why", "🎚️ What-if", "🧭 Route planner"])
-
-    # ---- Prediction + explanation ----
+    sub = st.tabs(["Why", "What if", "Compare routes"])
     with sub[0]:
-        prob, minutes = predict(clf, reg, inputs, routes)
-        r1, r2, r3 = st.columns(3)
-        r1.metric("Chance of delay", f"{prob:.0%}")
-        r2.metric("Expected delay", f"{minutes:.1f} min")
-        r3.metric("Verdict", "Likely delayed" if prob >= 0.5 else "Likely on time")
-
-        st.markdown("**Why this prediction?**")
-        expl = explain(reg, inputs, routes)
-        show(plots.explanation_waterfall(expl))
-        st.caption("We start from this route on a typical calm day (weekday noon, clear, no event, "
-                   "normal traffic) and add each group of your trip's factors. Each bar is that "
-                   "group's average effect over every order of adding them (a Shapley value), so the "
-                   "bars add up exactly to the prediction.")
-
-    # ---- What-if explorer ----
+        st.plotly_chart(plots.waterfall(explain(reg, inputs)), width="stretch", config=CHART)
+        st.caption(f"Starts from a typical incident (a mechanical problem on route {TYPICAL['route']}, "
+                   "weekday noon, mild and dry) and adds your inputs group by group. Each bar is that "
+                   "group's average effect over every order of adding them (a Shapley value), so the bars "
+                   "add up to the prediction.")
     with sub[1]:
-        options = {
-            "Precipitation (mm)": ("precipitation_mm", [float(x) for x in range(0, 51, 2)]),
-            "Event attendance": ("event_attendance", list(range(0, 60_001, 2_500))),
-            "Traffic congestion": ("traffic_congestion_index", [x / 2 for x in range(0, 21)]),
-            "Temperature (°C)": ("temperature_c", [float(x) for x in range(-15, 41, 2)]),
-            "Wind speed (km/h)": ("wind_speed_kmh", [float(x) for x in range(0, 101, 5)]),
-            "Departure hour": ("hour", list(range(5, 24))),
-            "Weather condition": ("weather_condition", WEATHER_ORDER),
-        }
-        choice = st.selectbox("What do you want to change?", list(options))
-        feature, values = options[choice]
-        if feature == "event_attendance" and inputs["event_type"] == "No Event":
-            st.info("Pick a city event above first; with 'No Event' attendance is always 0.")
-        else:
-            curve = what_if(clf, reg, inputs, routes, feature, values)
-            show(plots.what_if_chart(curve, feature, choice, inputs[feature]))
-            st.caption("Everything else stays as you set it above. Only the selected input changes. "
-                       "Tree-based models (like Gradient Boosting) cannot extrapolate, so curves go flat "
-                       "beyond values that were common in the training data.")
-
-    # ---- Route planner ----
+        left, right = st.columns(2)
+        curve = what_if(clf, reg, inputs, "hour", list(range(24)))
+        left.plotly_chart(plots.what_if_line(curve, "hour", "Hour of day", inputs["hour"]),
+                          width="stretch", config=CHART)
+        kinds = what_if(clf, reg, inputs, "incident", incident_types)
+        right.plotly_chart(plots.compare_bars(kinds, "incident", inputs["incident"],
+                                              "Same moment, different incident"),
+                           width="stretch", config=CHART)
     with sub[2]:
-        st.write("Same date, time, weather, event and traffic on every route. Which is likely to run best?")
-        pick = st.multiselect("Transport types to compare", sorted(routes["transport_type"].unique()),
-                              default=sorted(routes["transport_type"].unique()))
-        sort_names = {"expected_delay_min": "Expected delay", "expected_total_min": "Total travel time",
-                      "chance_of_delay_%": "Chance of delay"}
-        sort_by = st.radio("Sort by", list(sort_names), format_func=sort_names.get, horizontal=True)
-        ids = routes.index[routes["transport_type"].isin(pick)]
-        if len(ids) == 0:
-            st.info("Select at least one transport type.")
-        else:
-            plan = plan_routes(clf, reg, inputs, routes, ids).sort_values(sort_by).reset_index(drop=True)
-            best = plan.iloc[0]
-            st.success(f"Best by {sort_names[sort_by].lower()}: **{best['route']}** ({best['type']}), "
-                       f"expected delay {best['expected_delay_min']} min, "
-                       f"{best['chance_of_delay_%']}% chance of being late.")
-            st.dataframe(plan, hide_index=True, width="stretch")
-            show(plots.route_plan_chart(plan))
-            st.caption("In this synthetic city each route links different stations, so this compares "
-                       "routes in general rather than alternatives for one journey.")
+        top = analysis.route_table(inc, min_incidents=100)["route"].head(20).tolist()
+        if inputs["route"] not in top:
+            top.append(inputs["route"])
+        by_route = what_if(clf, reg, inputs, "route", top)
+        by_route["route"] = "Route " + by_route["route"].astype(str)
+        st.plotly_chart(plots.compare_bars(by_route, "route", f"Route {inputs['route']}",
+                                           "The same incident on the 20 busiest routes"),
+                        width="stretch", config=CHART)

@@ -1,194 +1,163 @@
 """
 plots.py
 --------
-Chart functions shared by the EDA script (eda.py) and the dashboard (app.py).
-Every function takes the cleaned DataFrame and returns a Matplotlib figure,
-so the same chart can be saved as a PNG or shown in Streamlit.
+Interactive Plotly charts for the dashboard. All charts share one small theme
+(colours and fonts) so the app looks consistent.
 """
 
-import matplotlib
-matplotlib.use("Agg")  # draw without a screen (needed for scripts/servers)
-import matplotlib.pyplot as plt
-import matplotlib.ticker  # noqa: F401  (used for % axis labels)
-import pandas as pd
-import seaborn as sns
+import plotly.graph_objects as go
+import plotly.io as pio
 
-from config import DAY_ORDER, WEATHER_ORDER, EVENT_ORDER, DELAY_THRESHOLD_MIN
+from config import DAY_ORDER
 
-sns.set_theme(style="whitegrid")
-MAIN_COLOR = "#2a6f97"
+# ---- Design tokens (also used in assets/style.css) ----
+ASPHALT = "#1F2A36"   # text, dark surfaces
+SLATE = "#6B7785"     # secondary text, neutral bars
+LINE = "#D9DEE3"      # gridlines and borders
+SIGNAL = "#F5C400"    # accent: the thing to look at
+LATE = "#C2253A"      # major delays / more incidents than normal
+CALM = "#1D7874"      # fewer incidents than normal / on time
+FONT = "Barlow, 'Segoe UI', sans-serif"
+
+pio.templates["late_again"] = go.layout.Template(layout=dict(
+    font=dict(family=FONT, color=ASPHALT, size=14),
+    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+    colorway=[ASPHALT, SIGNAL, LATE, CALM, SLATE],
+    xaxis=dict(showgrid=False, linecolor=LINE, ticks="outside", tickcolor=LINE),
+    yaxis=dict(gridcolor=LINE, zeroline=False),
+    margin=dict(l=10, r=10, t=40, b=10),
+    hoverlabel=dict(font_family=FONT, bgcolor="white"),
+    title=dict(font=dict(size=17, family=FONT), x=0, xanchor="left"),
+))
+pio.templates.default = "late_again"
 
 
-def _order(values, preferred):
-    """Keep the preferred order but only for values present in the data."""
-    present = set(values)
-    return [v for v in preferred if v in present]
-
-
-def delay_distribution(df):
-    fig, ax = plt.subplots(figsize=(8, 4))
-    sns.histplot(df["arrival_delay_min"], bins=50, color=MAIN_COLOR, ax=ax)
-    ax.axvline(DELAY_THRESHOLD_MIN, color="crimson", ls="--",
-               label=f"Delay threshold ({DELAY_THRESHOLD_MIN} min)")
-    ax.set(title="Distribution of arrival delays", xlabel="Arrival delay (minutes)", ylabel="Number of trips")
-    ax.legend()
-    fig.tight_layout()
+def monthly_trend(inc):
+    m = inc.set_index("timestamp").resample("MS").agg(incidents=("delay_min", "size"),
+                                                     major=("major_delay", "sum"))
+    fig = go.Figure()
+    fig.add_bar(x=m.index, y=m["incidents"], name="All incidents", marker_color=LINE,
+                hovertemplate="%{x|%b %Y}: %{y:,} incidents<extra></extra>")
+    fig.add_bar(x=m.index, y=m["major"], name="Major (15+ min)", marker_color=LATE,
+                hovertemplate="%{x|%b %Y}: %{y:,} major<extra></extra>")
+    fig.update_layout(barmode="overlay", title="Delay incidents per month", height=340,
+                      legend=dict(orientation="h", y=1.12, x=1, xanchor="right"))
     return fig
 
 
-def delay_by_transport(df):
-    fig, ax = plt.subplots(figsize=(7, 4))
-    order = df.groupby("transport_type")["arrival_delay_min"].mean().sort_values().index
-    sns.barplot(data=df, x="transport_type", y="arrival_delay_min", order=order,
-                color=MAIN_COLOR, errorbar=("ci", 95), ax=ax)
-    ax.set(title="Average delay by transport type", xlabel="", ylabel="Mean delay (min)")
-    fig.tight_layout()
+def delay_histogram(inc):
+    fig = go.Figure(go.Histogram(x=inc["delay_min"], xbins=dict(start=0, end=121, size=2),
+                                 marker_color=ASPHALT, hovertemplate="%{x} min: %{y:,}<extra></extra>"))
+    fig.add_vline(x=15, line_dash="dot", line_color=LATE,
+                  annotation_text="major delay (15 min)", annotation_position="top right")
+    fig.update_layout(title="How late was the next bus?", xaxis_title="Delay (minutes)",
+                      yaxis_title="Incidents", height=340, bargap=0.05)
     return fig
 
 
-def delay_by_route(df):
-    order = df.groupby("route_id")["arrival_delay_min"].median().sort_values(ascending=False).index
-    fig, ax = plt.subplots(figsize=(10, 5))
-    sns.boxplot(data=df, x="route_id", y="arrival_delay_min", hue="transport_type",
-                order=order, dodge=False, showfliers=False, ax=ax)
-    ax.set(title="Delay distribution per route (outliers hidden)", xlabel="", ylabel="Arrival delay (min)")
-    ax.tick_params(axis="x", rotation=60)
-    ax.legend(title="Type", fontsize=8)
-    fig.tight_layout()
+def heatmap(table, title, colorscale, zlabel):
+    table = table.reindex([d for d in DAY_ORDER if d in table.index])
+    fig = go.Figure(go.Heatmap(z=table.values, x=table.columns, y=table.index, colorscale=colorscale,
+                               colorbar=dict(title=zlabel, thickness=10),
+                               hovertemplate="%{y} %{x}:00<br>" + zlabel + ": %{z:.1f}<extra></extra>"))
+    fig.update_layout(title=title, xaxis_title="Hour of day", height=330,
+                      xaxis=dict(dtick=2), yaxis=dict(autorange="reversed"))
     return fig
 
 
-def delay_by_weather(df):
-    order = _order(df["weather_condition"].unique(), WEATHER_ORDER)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    sns.barplot(data=df, x="weather_condition", y="arrival_delay_min", order=order,
-                color=MAIN_COLOR, ax=axes[0])
-    axes[0].set(title="Mean delay by weather", xlabel="", ylabel="Mean delay (min)")
-    axes[0].tick_params(axis="x", rotation=30)
-    sns.scatterplot(data=df.sample(min(len(df), 2000), random_state=0), x="precipitation_mm",
-                    y="arrival_delay_min", hue="transport_type", alpha=0.5, s=15, ax=axes[1])
-    axes[1].set(title="Rainfall vs delay (sample of trips)", xlabel="Precipitation (mm)", ylabel="Delay (min)")
-    fig.tight_layout()
+def route_bars(routes, top=15):
+    r = routes.head(top).iloc[::-1]
+    fig = go.Figure(go.Bar(
+        y="Route " + r["route"].astype(str), x=r["incidents"], orientation="h",
+        marker=dict(color=r["major_share"], colorscale=[[0, LINE], [1, LATE]], cmin=0.2, cmax=0.6,
+                    colorbar=dict(title="% major", tickformat=".0%", thickness=10)),
+        customdata=r[["median_delay", "major_share"]],
+        hovertemplate="%{y}: %{x:,} incidents<br>median %{customdata[0]:.0f} min, "
+                      "%{customdata[1]:.0%} major<extra></extra>"))
+    fig.update_layout(title=f"The {top} routes with the most delay incidents", height=470,
+                      xaxis_title="Incidents (2023-2024)")
     return fig
 
 
-def delay_by_event(df):
-    order = _order(df["event_type"].unique(), EVENT_ORDER)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    sns.barplot(data=df, x="event_type", y="arrival_delay_min", order=order,
-                color=MAIN_COLOR, ax=axes[0])
-    axes[0].set(title="Mean delay by city event", xlabel="", ylabel="Mean delay (min)")
-    axes[0].tick_params(axis="x", rotation=30)
-    sns.barplot(data=df, x="event_type", y="arrival_delay_min", hue="transport_type",
-                order=order, errorbar=None, ax=axes[1])
-    axes[1].set(title="Event impact by transport type", xlabel="", ylabel="Mean delay (min)")
-    axes[1].tick_params(axis="x", rotation=30)
-    axes[1].legend(fontsize=8)
-    fig.tight_layout()
+def incident_bars(table):
+    t = table.iloc[::-1]
+    fig = go.Figure()
+    fig.add_bar(y=t["incident"], x=t["median_delay"], orientation="h", marker_color=ASPHALT,
+                customdata=t[["incidents"]],
+                hovertemplate="%{y}: median %{x:.0f} min<br>%{customdata[0]:,} incidents<extra></extra>")
+    fig.update_layout(title="Median delay by incident type", xaxis_title="Median delay (minutes)", height=470)
     return fig
 
 
-def delay_by_hour(df):
-    hourly = df.groupby(["hour", "is_weekend"])["arrival_delay_min"].mean().reset_index()
-    hourly["Day type"] = hourly["is_weekend"].map({0: "Weekday", 1: "Weekend"})
-    fig, ax = plt.subplots(figsize=(9, 4))
-    sns.lineplot(data=hourly, x="hour", y="arrival_delay_min", hue="Day type", marker="o", ax=ax)
-    for start, end in [(7, 9), (17, 19)]:
-        ax.axvspan(start - 0.5, end + 0.5, color="orange", alpha=0.15)
-    ax.set(title="Mean delay by hour of day (shaded = weekday rush hours)",
-           xlabel="Hour of day", ylabel="Mean delay (min)")
-    fig.tight_layout()
+def ratio_chart(table, col, title):
+    """Actual vs expected incidents, as a ratio with a 90% interval. 1.0 = a normal hour."""
+    # Colour only clear, meaningful differences: the 90% range excludes 1 AND the effect is 5%+
+    colors = [LATE if lo > 1 and r >= 1.05 else CALM if hi < 1 and r <= 0.95 else SLATE
+              for r, lo, hi in zip(table["ratio"], table["ratio_low"], table["ratio_high"])]
+    labels = table[col].astype(str)
+    fig = go.Figure(go.Bar(
+        x=labels, y=table["ratio"], marker_color=colors,
+        error_y=dict(type="data", symmetric=False, array=table["ratio_high"] - table["ratio"],
+                     arrayminus=table["ratio"] - table["ratio_low"], color=SLATE, thickness=1.2),
+        customdata=table[["hours", "incidents_per_hour", "expected_per_hour"]],
+        hovertemplate="%{x}: %{y:.2f}x normal<br>%{customdata[0]:,} hours<br>"
+                      "%{customdata[1]:.1f} incidents/h vs %{customdata[2]:.1f} expected<extra></extra>"))
+    fig.add_hline(y=1, line_color=ASPHALT, line_width=1)
+    fig.update_layout(title=title, yaxis_title="Incidents vs a normal hour (x)", height=360)
     return fig
 
 
-def hour_weekday_heatmap(df):
-    table = df.pivot_table(index="day_of_week", columns="hour", values="arrival_delay_min", aggfunc="mean")
-    table = table.reindex(_order(table.index, DAY_ORDER))
-    fig, ax = plt.subplots(figsize=(12, 4))
-    sns.heatmap(table, cmap="YlOrRd", ax=ax, cbar_kws={"label": "Mean delay (min)"})
-    ax.set(title="Mean delay by weekday and hour", xlabel="Hour", ylabel="")
-    fig.tight_layout()
+def actual_vs_predicted(preds, n=4000):
+    s = preds.sample(min(n, len(preds)), random_state=0)
+    fig = go.Figure(go.Scattergl(x=s["delay_min"], y=s["predicted_delay_min"], mode="markers",
+                                 marker=dict(color=ASPHALT, opacity=0.18, size=5),
+                                 hovertemplate="actual %{x} min, predicted %{y:.1f}<extra></extra>"))
+    fig.add_shape(type="line", x0=0, y0=0, x1=120, y1=120, line=dict(color=LATE, dash="dot"))
+    fig.update_layout(title="Actual vs predicted delay (2024 test set)", height=380,
+                      xaxis_title="Actual delay (min)", yaxis_title="Predicted (min)",
+                      yaxis_range=[0, 70])
     return fig
 
 
-def correlation_heatmap(df):
-    cols = ["arrival_delay_min", "precipitation_mm", "wind_speed_kmh", "temperature_c",
-            "humidity_pct", "event_attendance", "traffic_congestion_index",
-            "is_peak_hour", "is_weekend", "is_holiday", "distance_km"]
-    fig, ax = plt.subplots(figsize=(9, 7))
-    sns.heatmap(df[cols].corr(), annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax)
-    ax.set(title="Correlation between numeric features")
-    fig.tight_layout()
+def importance_bars(imp):
+    t = imp[imp["importance"] > 0.001].iloc[::-1]
+    fig = go.Figure(go.Bar(y=t["feature"], x=t["importance"], orientation="h", marker_color=ASPHALT,
+                           hovertemplate="%{y}: +%{x:.2f} min MAE when shuffled<extra></extra>"))
+    fig.update_layout(title="What the delay model relies on", height=360,
+                      xaxis_title="Extra error (min) when this input is scrambled")
     return fig
 
 
-def actual_vs_predicted(pred_df):
-    """pred_df needs columns 'actual' and 'predicted' (from reports/test_predictions.csv)."""
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.scatter(pred_df["actual"], pred_df["predicted"], alpha=0.35, s=12, color=MAIN_COLOR)
-    lim = [min(pred_df["actual"].min(), pred_df["predicted"].min()),
-           max(pred_df["actual"].max(), pred_df["predicted"].max())]
-    ax.plot(lim, lim, "r--", label="Perfect prediction")
-    ax.set(title="Actual vs predicted delay (test set)", xlabel="Actual delay (min)",
-           ylabel="Predicted delay (min)")
-    ax.legend()
-    fig.tight_layout()
+def waterfall(expl):
+    measures = ["absolute"] + ["relative"] * (len(expl) - 2) + ["total"]
+    fig = go.Figure(go.Waterfall(
+        x=expl["factor"], y=expl["minutes"], measure=measures,
+        text=[f"{v:+.1f}" if m == "relative" else f"{v:.1f}" for v, m in zip(expl["minutes"], measures)],
+        textposition="outside",
+        increasing=dict(marker=dict(color=LATE)), decreasing=dict(marker=dict(color=CALM)),
+        totals=dict(marker=dict(color=ASPHALT)), connector=dict(line=dict(color=LINE))))
+    fig.update_layout(title="Why this many minutes?", yaxis_title="Delay (min)", height=380,
+                      showlegend=False)
     return fig
 
 
-def explanation_waterfall(expl):
-    """Waterfall chart: reference delay -> + each factor group -> predicted delay."""
-    fig, ax = plt.subplots(figsize=(9, 3.8))
-    running = 0.0
-    labels = list(expl["factor"])
-    for i, (label, value) in enumerate(zip(expl["factor"], expl["minutes"])):
-        if i == 0 or i == len(expl) - 1:          # first and last bars start at zero
-            ax.bar(i, value, color="#7f8c8d")
-            running = value if i == 0 else running
-            y_text = value
-        else:
-            color = "crimson" if value > 0 else "seagreen"
-            ax.bar(i, value, bottom=running, color=color)
-            running += value
-            y_text = max(running, running - value)
-        ax.text(i, y_text + 0.3, f"{value:+.1f}" if 0 < i < len(expl) - 1 else f"{value:.1f}",
-                ha="center", fontsize=9)
-    ax.set_xticks(range(len(labels)))
-    ax.set_xticklabels([lbl.replace(" on a ", "\non a ") for lbl in labels], fontsize=9)
-    ax.axhline(0, color="black", lw=0.8)
-    lo, hi = ax.get_ylim()
-    ax.set_ylim(min(lo, 0), hi + 0.12 * (hi - min(lo, 0)))   # room for the value labels
-    ax.set(ylabel="Delay (min)", title="Red = adds delay, green = reduces it")
-    fig.tight_layout()
+def what_if_line(curve, key, label, current):
+    fig = go.Figure()
+    fig.add_scatter(x=curve[key], y=curve["expected_delay"], mode="lines+markers",
+                    line=dict(color=ASPHALT, width=2.5), name="Expected delay",
+                    hovertemplate="%{x}: %{y:.1f} min<extra></extra>")
+    fig.add_vline(x=current, line_color=SIGNAL, line_width=3)
+    fig.update_layout(title=f"Expected delay as {label.lower()} changes", xaxis_title=label,
+                      yaxis_title="Minutes", height=340, showlegend=False)
     return fig
 
 
-def what_if_chart(curve, feature, label, current_value):
-    """Two side-by-side charts: expected minutes and chance of delay vs one input."""
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    categorical = not pd.api.types.is_numeric_dtype(curve[feature])
-    for ax, col, title in [(axes[0], "expected_delay_min", "Expected delay (min)"),
-                           (axes[1], "chance_of_delay", "Chance of delay")]:
-        if categorical:
-            colors = ["crimson" if v == current_value else MAIN_COLOR for v in curve[feature]]
-            ax.bar(curve[feature].astype(str), curve[col], color=colors)
-            ax.tick_params(axis="x", rotation=30)
-        else:
-            ax.plot(curve[feature], curve[col], marker="o", color=MAIN_COLOR)
-            ax.axvline(current_value, color="crimson", ls="--", label="Your trip")
-            ax.legend()
-        ax.set(title=title, xlabel=label)
-    axes[1].set_ylim(0, 1)
-    axes[1].yaxis.set_major_formatter(matplotlib.ticker.PercentFormatter(1.0))
-    fig.tight_layout()
-    return fig
-
-
-def route_plan_chart(plan):
-    """Horizontal bars: expected delay for each route, coloured by transport type."""
-    fig, ax = plt.subplots(figsize=(9, max(3, 0.32 * len(plan))))
-    sns.barplot(data=plan, y="route", x="expected_delay_min", hue="type", dodge=False, ax=ax)
-    ax.set(title="Expected delay per route for your conditions", xlabel="Expected delay (min)", ylabel="")
-    ax.legend(title="Type", fontsize=8)
-    fig.tight_layout()
+def compare_bars(curve, key, current, title):
+    c = curve.sort_values("expected_delay")
+    colors = [SIGNAL if str(v) == str(current) else LINE for v in c[key]]
+    fig = go.Figure(go.Bar(y=c[key].astype(str), x=c["expected_delay"], orientation="h",
+                           marker_color=colors, marker_line=dict(color=ASPHALT, width=0.6),
+                           customdata=c[["major_chance"]],
+                           hovertemplate="%{y}: %{x:.1f} min, %{customdata[0]:.0%} major<extra></extra>"))
+    fig.update_layout(title=title, xaxis_title="Expected delay (min)", height=max(320, 26 * len(c)))
     return fig
